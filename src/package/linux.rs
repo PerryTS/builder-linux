@@ -156,9 +156,11 @@ fn create_deb(
     }
 
     // Generate .desktop file
+    // Sanitize category: strip newlines to prevent .desktop field injection
     let category = manifest.linux_category.as_deref().unwrap_or(DEFAULT_CATEGORY);
+    let safe_category: String = category.chars().filter(|c| *c != '\n' && *c != '\r').collect();
     let desktop_content =
-        generate_desktop_file(&manifest.app_name, &bin_name, &bin_name, category);
+        generate_desktop_file(&manifest.app_name, &bin_name, &bin_name, &safe_category);
     std::fs::write(
         usr_share_apps.join(format!("{bin_name}.desktop")),
         &desktop_content,
@@ -166,11 +168,13 @@ fn create_deb(
     .map_err(|e| format!("Write .desktop: {e}"))?;
 
     // Generate DEBIAN/control
+    // Sanitize description: strip newlines to prevent deb control field injection
     let description = manifest
         .linux_description
         .as_deref()
         .unwrap_or(&manifest.app_name);
-    let control = generate_deb_control(&manifest.app_name, &manifest.version, description);
+    let safe_description: String = description.chars().filter(|c| *c != '\n' && *c != '\r').collect();
+    let control = generate_deb_control(&manifest.app_name, &manifest.version, &safe_description);
     std::fs::write(debian_dir.join("control"), &control)
         .map_err(|e| format!("Write control: {e}"))?;
 

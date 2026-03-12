@@ -19,6 +19,19 @@ pub async fn compile(
 ) -> Result<(), String> {
     let entry = project_dir.join(&manifest.entry);
 
+    let canonical_project = project_dir
+        .canonicalize()
+        .map_err(|e| format!("Failed to canonicalize project dir: {e}"))?;
+    let canonical_entry = entry
+        .canonicalize()
+        .map_err(|e| format!("Entry file not found or inaccessible: {e}"))?;
+    if !canonical_entry.starts_with(&canonical_project) {
+        return Err(format!(
+            "Entry path escapes project directory: {}",
+            manifest.entry
+        ));
+    }
+
     if target.is_some() {
         setup_target_symlink(perry_binary, project_dir)?;
     }

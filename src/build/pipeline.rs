@@ -1,6 +1,7 @@
 use crate::build::assets::{generate_android_icons, encode_png};
 use crate::build::cleanup::{cleanup_tmpdir, create_build_tmpdir};
 use crate::build::compiler;
+use crate::build::validate;
 use crate::config::WorkerConfig;
 use crate::package::{android, linux};
 use crate::publish::playstore;
@@ -29,6 +30,8 @@ pub async fn execute_build(
     cancelled: Arc<AtomicBool>,
     progress: ProgressSender,
 ) -> Result<PathBuf, String> {
+    validate::validate_manifest(&request.manifest)?;
+
     let tmpdir = create_build_tmpdir().map_err(|e| format!("Failed to create tmpdir: {e}"))?;
 
     let result = run_pipeline(request, config, &cancelled, &progress, &tmpdir).await;
@@ -380,9 +383,36 @@ fn extract_tarball(tarball_path: &std::path::Path, dest: &std::path::Path) -> Re
         std::fs::File::open(tarball_path).map_err(|e| format!("Failed to open tarball: {e}"))?;
     let decoder = flate2::read::GzDecoder::new(file);
     let mut archive = tar::Archive::new(decoder);
-    archive
-        .unpack(dest)
-        .map_err(|e| format!("Failed to extract tarball: {e}"))?;
+
+    // Manually iterate entries to prevent path traversal attacks.
+    // archive.unpack() does NOT validate paths — a malicious tarball could
+    // write files outside the destination via ".." components or absolute paths.
+    for entry in archive
+        .entries()
+        .map_err(|e| format!("Failed to read tarball entries: {e}"))?
+    {
+        let mut entry = entry.map_err(|e| format!("Failed to read tarball entry: {e}"))?;
+        let path = entry
+            .path()
+            .map_err(|e| format!("Failed to read entry path: {e}"))?
+            .into_owned();
+
+        if path.is_absolute()
+            || path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(format!(
+                "Tarball contains unsafe path (path traversal rejected): {}",
+                path.display()
+            ));
+        }
+
+        entry
+            .unpack_in(dest)
+            .map_err(|e| format!("Failed to extract {}: {e}", path.display()))?;
+    }
+
     Ok(())
 }
 

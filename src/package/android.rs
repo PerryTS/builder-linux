@@ -1,3 +1,4 @@
+use crate::build::validate::escape_xml;
 use crate::queue::job::BuildManifest;
 use crate::ws::messages::{LogStream, ServerMessage, StageName};
 use std::path::{Path, PathBuf};
@@ -180,9 +181,9 @@ pub fn generate_android_manifest_xml(manifest: &BuildManifest) -> String {
         .iter()
         .map(|p| {
             let perm = if p.contains('.') {
-                p.to_string()
+                escape_xml(p)
             } else {
-                format!("android.permission.{p}")
+                format!("android.permission.{}", escape_xml(p))
             };
             format!("    <uses-permission android:name=\"{perm}\" />")
         })
@@ -216,39 +217,28 @@ pub fn generate_android_manifest_xml(manifest: &BuildManifest) -> String {
         </activity>
     </application>
 </manifest>"#,
-        bundle_id = manifest.bundle_id,
-        app_name = manifest.app_name,
+        bundle_id = escape_xml(&manifest.bundle_id),
+        app_name = escape_xml(&manifest.app_name),
     )
 }
 
 /// Run a Gradle task, streaming stdout/stderr.
+///
+/// SECURITY: Always uses system `gradle`, never executes `gradlew` from the project
+/// directory. A malicious tarball could include a `gradlew` script that runs
+/// arbitrary code with the worker's privileges.
 async fn run_gradle(
     project_dir: &Path,
     task: &str,
     tx: Option<&broadcast::Sender<ServerMessage>>,
 ) -> Result<(), String> {
-    let gradle_cmd = if cfg!(windows) { "gradlew.bat" } else { "./gradlew" };
-
-    // Try project-local gradlew first, fall back to system gradle
-    let cmd_path = project_dir.join(gradle_cmd);
-    let (program, use_project_wrapper) = if cmd_path.exists() {
-        (cmd_path.to_string_lossy().to_string(), true)
-    } else {
-        ("gradle".to_string(), false)
-    };
-
-    let mut cmd = Command::new(&program);
-    if !use_project_wrapper {
-        cmd.arg("-p").arg(project_dir);
-    }
-    cmd.arg(task)
+    let mut cmd = Command::new("gradle");
+    cmd.arg("-p")
+        .arg(project_dir)
+        .arg(task)
         .arg("--no-daemon")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-
-    if use_project_wrapper {
-        cmd.current_dir(project_dir);
-    }
 
     let mut child = cmd
         .spawn()
@@ -436,6 +426,9 @@ mod tests {
             android_target_sdk: None,
             android_permissions: None,
             android_distribute: None,
+            linux_format: None,
+            linux_category: None,
+            linux_description: None,
         };
 
         let xml = generate_android_manifest_xml(&manifest);
@@ -472,6 +465,9 @@ mod tests {
                 "ACCESS_FINE_LOCATION".into(),
             ]),
             android_distribute: None,
+            linux_format: None,
+            linux_category: None,
+            linux_description: None,
         };
 
         let xml = generate_android_manifest_xml(&manifest);
@@ -505,6 +501,9 @@ mod tests {
                 "com.google.android.providers.gsf.permission.READ_GSERVICES".into(),
             ]),
             android_distribute: None,
+            linux_format: None,
+            linux_category: None,
+            linux_description: None,
         };
 
         let xml = generate_android_manifest_xml(&manifest);
