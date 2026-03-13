@@ -7,6 +7,7 @@ pub struct WorkerConfig {
     pub android_home: Option<String>,
     pub android_ndk_home: Option<String>,
     pub worker_name: Option<String>,
+    pub hub_secret: Option<String>,
 }
 
 impl WorkerConfig {
@@ -23,6 +24,7 @@ impl WorkerConfig {
                 .or_else(|_| env::var("ANDROID_NDK_HOME"))
                 .ok(),
             worker_name: env::var("PERRY_WORKER_NAME").ok(),
+            hub_secret: env::var("PERRY_HUB_WORKER_SECRET").ok(),
         }
     }
 }
