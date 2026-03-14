@@ -196,13 +196,19 @@ pub fn generate_android_manifest_xml(manifest: &BuildManifest) -> String {
         format!("\n{permissions_xml}\n")
     };
 
+    let has_icon = manifest.icon.is_some();
+    let icon_attr = if has_icon {
+        "\n        android:icon=\"@mipmap/ic_launcher\""
+    } else {
+        ""
+    };
+
     format!(
         r#"<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">{permissions_block}
     <application
         android:allowBackup="true"
-        android:label="{app_name}"
-        android:icon="@mipmap/ic_launcher"
+        android:label="{app_name}"{icon_attr}
         android:supportsRtl="true"
         android:theme="@style/Theme.Perry">
         <activity
@@ -217,6 +223,7 @@ pub fn generate_android_manifest_xml(manifest: &BuildManifest) -> String {
     </application>
 </manifest>"#,
         app_name = escape_xml(&manifest.app_name),
+        icon_attr = icon_attr,
     )
 }
 
