@@ -264,15 +264,18 @@ async fn run_gradle(
     let tx_err = tx.cloned();
     let stderr_task = tokio::spawn(async move {
         let mut reader = BufReader::new(stderr).lines();
+        let mut lines = Vec::new();
         while let Ok(Some(line)) = reader.next_line().await {
             if let Some(ref tx) = tx_err {
                 let _ = tx.send(ServerMessage::Log {
                     stage: StageName::Bundling,
-                    line,
+                    line: line.clone(),
                     stream: LogStream::Stderr,
                 });
             }
+            lines.push(line);
         }
+        lines
     });
 
     let status = child
@@ -281,13 +284,19 @@ async fn run_gradle(
         .map_err(|e| format!("Failed to wait for gradle: {e}"))?;
 
     stdout_task.await.ok();
-    stderr_task.await.ok();
+    let stderr_lines = stderr_task.await.unwrap_or_default();
 
     if !status.success() {
+        let detail = if stderr_lines.is_empty() {
+            String::new()
+        } else {
+            format!("\n{}", stderr_lines.join("\n"))
+        };
         return Err(format!(
-            "Gradle {} failed with exit code {}",
+            "Gradle {} failed with exit code {}{}",
             task,
-            status.code().unwrap_or(-1)
+            status.code().unwrap_or(-1),
+            detail
         ));
     }
 
