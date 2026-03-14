@@ -191,6 +191,32 @@ async fn run_perry_update(perry_binary: &str) -> (bool, String, Option<String>) 
         _ => {}
     }
 
+    // Build Android UI library and copy next to perry binary
+    let android_build = tokio::process::Command::new(&cargo)
+        .args(["build", "--release", "-p", "perry-ui-android", "--target", "aarch64-linux-android"])
+        .current_dir(src_dir)
+        .output()
+        .await;
+
+    match android_build {
+        Ok(ref o) if o.status.success() => {
+            // Copy to target/release/ so perry can find it
+            let android_lib = src_dir.join("target/aarch64-linux-android/release/libperry_ui_android.a");
+            let dest = src_dir.join("target/release/libperry_ui_android.a");
+            if android_lib.exists() {
+                if let Err(e) = std::fs::copy(&android_lib, &dest) {
+                    tracing::warn!("Failed to copy libperry_ui_android.a: {e}");
+                }
+            }
+        }
+        Ok(ref o) => {
+            tracing::warn!("perry-ui-android build failed (non-fatal): {}", String::from_utf8_lossy(&o.stderr));
+        }
+        Err(e) => {
+            tracing::warn!("perry-ui-android build failed (non-fatal): {e}");
+        }
+    }
+
     let new_version = get_perry_version(perry_binary).unwrap_or_default();
     tracing::info!(version = %new_version, "Perry update complete");
     (true, new_version, None)
