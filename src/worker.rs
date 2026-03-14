@@ -191,29 +191,42 @@ async fn run_perry_update(perry_binary: &str) -> (bool, String, Option<String>) 
         _ => {}
     }
 
-    // Build Android UI library and copy next to perry binary
-    let android_build = tokio::process::Command::new(&cargo)
-        .args(["build", "--release", "-p", "perry-ui-android", "--target", "aarch64-linux-android"])
+    // Build Android-targeted libraries so perry's find_library resolves them
+    // from target/aarch64-linux-android/release/ during cross-compilation
+    let android_rt = tokio::process::Command::new(&cargo)
+        .args(["build", "--release", "-p", "perry-runtime", "-p", "perry-ui-android", "--target", "aarch64-linux-android"])
         .current_dir(src_dir)
         .output()
         .await;
 
-    match android_build {
-        Ok(ref o) if o.status.success() => {
-            // Copy to target/release/ so perry can find it
-            let android_lib = src_dir.join("target/aarch64-linux-android/release/libperry_ui_android.a");
-            let dest = src_dir.join("target/release/libperry_ui_android.a");
-            if android_lib.exists() {
-                if let Err(e) = std::fs::copy(&android_lib, &dest) {
-                    tracing::warn!("Failed to copy libperry_ui_android.a: {e}");
-                }
-            }
-        }
-        Ok(ref o) => {
-            tracing::warn!("perry-ui-android build failed (non-fatal): {}", String::from_utf8_lossy(&o.stderr));
+    match &android_rt {
+        Ok(o) if !o.status.success() => {
+            tracing::warn!("Android runtime/ui build failed (non-fatal): {}", String::from_utf8_lossy(&o.stderr));
         }
         Err(e) => {
-            tracing::warn!("perry-ui-android build failed (non-fatal): {e}");
+            tracing::warn!("Android runtime/ui build failed (non-fatal): {e}");
+        }
+        _ => {}
+    }
+
+    // Build stdlib separately — exclude email feature to avoid openssl cross-compile
+    let android_stdlib = tokio::process::Command::new(&cargo)
+        .args(["build", "--release", "-p", "perry-stdlib", "--no-default-features",
+               "--features", "http-server,http-client,database,crypto,compression,websocket,image,scheduler,ids,html-parser,rate-limit,validation",
+               "--target", "aarch64-linux-android"])
+        .current_dir(src_dir)
+        .output()
+        .await;
+
+    match &android_stdlib {
+        Ok(o) if !o.status.success() => {
+            tracing::warn!("Android stdlib build failed (non-fatal): {}", String::from_utf8_lossy(&o.stderr));
+        }
+        Err(e) => {
+            tracing::warn!("Android stdlib build failed (non-fatal): {e}");
+        }
+        _ => {
+            tracing::info!("Android-targeted libraries built successfully");
         }
     }
 
