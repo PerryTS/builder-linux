@@ -198,8 +198,7 @@ pub fn generate_android_manifest_xml(manifest: &BuildManifest) -> String {
 
     format!(
         r#"<?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="{bundle_id}">{permissions_block}
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">{permissions_block}
     <application
         android:allowBackup="true"
         android:label="{app_name}"
@@ -217,7 +216,6 @@ pub fn generate_android_manifest_xml(manifest: &BuildManifest) -> String {
         </activity>
     </application>
 </manifest>"#,
-        bundle_id = escape_xml(&manifest.bundle_id),
         app_name = escape_xml(&manifest.app_name),
     )
 }
