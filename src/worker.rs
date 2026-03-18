@@ -174,39 +174,45 @@ async fn run_perry_update(perry_binary: &str) -> (bool, String, Option<String>) 
     }
 
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-    let build = tokio::process::Command::new(&cargo)
-        .args(["build", "--release", "-p", "perry", "-p", "perry-runtime", "-p", "perry-stdlib"])
-        .current_dir(src_dir)
-        .output()
-        .await;
 
-    match build {
-        Ok(ref o) if !o.status.success() => {
-            let stderr = String::from_utf8_lossy(&o.stderr).to_string();
-            return (false, String::new(), Some(format!("cargo build failed: {stderr}")));
+    // Build packages one at a time to keep memory usage low on small VPS instances
+    for pkg in &["perry", "perry-runtime", "perry-stdlib"] {
+        let build = tokio::process::Command::new(&cargo)
+            .args(["build", "--release", "-p", pkg])
+            .current_dir(src_dir)
+            .output()
+            .await;
+
+        match build {
+            Ok(ref o) if !o.status.success() => {
+                let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+                return (false, String::new(), Some(format!("cargo build -p {pkg} failed: {stderr}")));
+            }
+            Err(e) => {
+                return (false, String::new(), Some(format!("cargo build -p {pkg} failed: {e}")));
+            }
+            _ => {}
         }
-        Err(e) => {
-            return (false, String::new(), Some(format!("cargo build failed: {e}")));
-        }
-        _ => {}
     }
 
-    // Build Android-targeted libraries so perry's find_library resolves them
-    // from target/aarch64-linux-android/release/ during cross-compilation
-    let android_rt = tokio::process::Command::new(&cargo)
-        .args(["build", "--release", "-p", "perry-runtime", "-p", "perry-ui-android", "--target", "aarch64-linux-android"])
-        .current_dir(src_dir)
-        .output()
-        .await;
+    // Build Android-targeted libraries one at a time (memory-constrained server)
+    // so perry's find_library resolves them from target/aarch64-linux-android/release/
+    for pkg in &["perry-runtime", "perry-ui-android"] {
+        let android_build = tokio::process::Command::new(&cargo)
+            .args(["build", "--release", "-p", pkg, "--target", "aarch64-linux-android"])
+            .current_dir(src_dir)
+            .output()
+            .await;
 
-    match &android_rt {
-        Ok(o) if !o.status.success() => {
-            tracing::warn!("Android runtime/ui build failed (non-fatal): {}", String::from_utf8_lossy(&o.stderr));
+        match &android_build {
+            Ok(o) if !o.status.success() => {
+                tracing::warn!("Android {pkg} build failed (non-fatal): {}", String::from_utf8_lossy(&o.stderr));
+            }
+            Err(e) => {
+                tracing::warn!("Android {pkg} build failed (non-fatal): {e}");
+            }
+            _ => {}
         }
-        Err(e) => {
-            tracing::warn!("Android runtime/ui build failed (non-fatal): {e}");
-        }
-        _ => {}
     }
 
     // Build stdlib separately — exclude email feature to avoid openssl cross-compile
