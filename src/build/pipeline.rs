@@ -259,7 +259,18 @@ async fn run_android_pipeline(
             android_signing::sign_apk(&artifact_path, ks_path, ks_pass, key_alias, key_pass)
                 .await?
         }
+    } else if is_playstore {
+        return Err(
+            "Google Play requires a signed bundle but no Android keystore was provided. \
+             Generate one with: keytool -genkey -v -keystore release.keystore -alias key0 -keyalg RSA -keysize 2048 -validity 10000"
+                .into(),
+        );
     } else {
+        let _ = progress.send(ServerMessage::Log {
+            stage: StageName::Signing,
+            line: "No keystore provided — skipping signing (APK will be unsigned)".into(),
+            stream: crate::ws::messages::LogStream::Stderr,
+        });
         artifact_path.clone()
     };
 
