@@ -161,6 +161,87 @@ fn write_icns(output_path: &Path, entries: &[(Vec<u8>, &[u8; 4])]) -> Result<(),
     Ok(())
 }
 
+/// ICO sizes to embed (standard Windows icon sizes)
+const ICO_SIZES: &[u32] = &[16, 24, 32, 48, 64, 128, 256];
+
+/// Generate a Windows .ico file from a source image.
+/// Minimum source size: 256x256. Each size is stored as a PNG inside the ICO container.
+pub fn generate_ico(icon_path: &Path, output_path: &Path) -> Result<(), String> {
+    let img = image::open(icon_path).map_err(|e| format!("Failed to open icon: {e}"))?;
+
+    if img.width() < 256 || img.height() < 256 {
+        return Err(format!(
+            "Icon must be at least 256x256, got {}x{}",
+            img.width(),
+            img.height()
+        ));
+    }
+
+    let mut png_entries: Vec<(u32, Vec<u8>)> = Vec::new();
+    for &size in ICO_SIZES {
+        let resized = img.resize_exact(size, size, FilterType::Lanczos3);
+        let png_data = encode_png(&resized)?;
+        png_entries.push((size, png_data));
+    }
+
+    write_ico(output_path, &png_entries)
+}
+
+/// Write ICO binary format:
+/// - ICONDIR header (6 bytes): reserved(2) + type(2, =1 for ICO) + count(2)
+/// - ICONDIRENTRY array (16 bytes each): width, height, colors, reserved, planes, bpp, size, offset
+/// - Image data (PNG blobs)
+fn write_ico(output_path: &Path, entries: &[(u32, Vec<u8>)]) -> Result<(), String> {
+    let mut file =
+        std::fs::File::create(output_path).map_err(|e| format!("Failed to create ico: {e}"))?;
+
+    let count = entries.len() as u16;
+
+    // ICONDIR header
+    file.write_all(&0u16.to_le_bytes())
+        .map_err(|e| format!("Write error: {e}"))?; // reserved
+    file.write_all(&1u16.to_le_bytes())
+        .map_err(|e| format!("Write error: {e}"))?; // type = ICO
+    file.write_all(&count.to_le_bytes())
+        .map_err(|e| format!("Write error: {e}"))?; // image count
+
+    // Calculate data offset: 6 (header) + 16 * count (directory entries)
+    let data_start = 6u32 + 16 * count as u32;
+    let mut current_offset = data_start;
+
+    // Write ICONDIRENTRY for each image
+    for (size, png_data) in entries {
+        // Width/height: 0 means 256
+        let wh = if *size >= 256 { 0u8 } else { *size as u8 };
+        file.write_all(&[wh])
+            .map_err(|e| format!("Write error: {e}"))?; // width
+        file.write_all(&[wh])
+            .map_err(|e| format!("Write error: {e}"))?; // height
+        file.write_all(&[0u8])
+            .map_err(|e| format!("Write error: {e}"))?; // color palette count
+        file.write_all(&[0u8])
+            .map_err(|e| format!("Write error: {e}"))?; // reserved
+        file.write_all(&1u16.to_le_bytes())
+            .map_err(|e| format!("Write error: {e}"))?; // color planes
+        file.write_all(&32u16.to_le_bytes())
+            .map_err(|e| format!("Write error: {e}"))?; // bits per pixel
+        file.write_all(&(png_data.len() as u32).to_le_bytes())
+            .map_err(|e| format!("Write error: {e}"))?; // image data size
+        file.write_all(&current_offset.to_le_bytes())
+            .map_err(|e| format!("Write error: {e}"))?; // offset to image data
+
+        current_offset += png_data.len() as u32;
+    }
+
+    // Write PNG data blobs
+    for (_size, png_data) in entries {
+        file.write_all(png_data)
+            .map_err(|e| format!("Write error: {e}"))?;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

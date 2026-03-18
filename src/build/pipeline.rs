@@ -1,9 +1,10 @@
-use crate::build::assets::{generate_android_icons, encode_png};
+use crate::build::assets::{generate_android_icons, generate_ico, encode_png};
 use crate::build::cleanup::{cleanup_tmpdir, create_build_tmpdir};
 use crate::build::compiler;
 use crate::build::validate;
 use crate::config::WorkerConfig;
 use crate::package::{android, linux};
+use crate::package::windows as win_package;
 use crate::publish::playstore;
 use crate::queue::job::{BuildCredentials, BuildManifest};
 use crate::signing::android as android_signing;
@@ -63,12 +64,18 @@ async fn run_pipeline(
     // Stage 2: Compile
     send_stage(progress, StageName::Compiling, "Compiling TypeScript to native");
     check_cancelled(cancelled)?;
-    let binary_path = tmpdir.join("output").join(&request.manifest.app_name);
+    let binary_name = if target == BuildTarget::Windows {
+        format!("{}.exe", request.manifest.app_name)
+    } else {
+        request.manifest.app_name.clone()
+    };
+    let binary_path = tmpdir.join("output").join(&binary_name);
     std::fs::create_dir_all(binary_path.parent().unwrap())
         .map_err(|e| format!("Failed to create output dir: {e}"))?;
 
     let compiler_target = match target {
         BuildTarget::Android => Some("android"),
+        BuildTarget::Windows => Some("windows"),
         BuildTarget::Linux => None, // native compilation on Linux host
     };
     compiler::compile(
@@ -82,16 +89,25 @@ async fn run_pipeline(
     )
     .await?;
 
-    let actual_binary = if target == BuildTarget::Android {
-        if !binary_path.exists() {
-            return Err("Compiler produced no output .so library".into());
+    let actual_binary = match target {
+        BuildTarget::Android => {
+            if !binary_path.exists() {
+                return Err("Compiler produced no output .so library".into());
+            }
+            binary_path.clone()
         }
-        binary_path.clone()
-    } else {
-        if !binary_path.exists() {
-            return Err("Compiler produced no output binary".into());
+        BuildTarget::Windows => {
+            if !binary_path.exists() {
+                return Err("Compiler produced no output .exe binary".into());
+            }
+            binary_path.clone()
         }
-        binary_path.clone()
+        BuildTarget::Linux => {
+            if !binary_path.exists() {
+                return Err("Compiler produced no output binary".into());
+            }
+            binary_path.clone()
+        }
     };
     send_progress(progress, StageName::Compiling, 100, None);
 
@@ -102,6 +118,10 @@ async fn run_pipeline(
         }
         BuildTarget::Android => {
             run_android_pipeline(request, config, cancelled, progress, tmpdir, &actual_binary, &project_dir)
+                .await
+        }
+        BuildTarget::Windows => {
+            run_windows_pipeline(request, config, cancelled, progress, tmpdir, &actual_binary, &project_dir)
                 .await
         }
     }
@@ -160,6 +180,59 @@ async fn run_linux_pipeline(
     // Copy artifact to stable location
     let ext = format.extension();
     let artifact_path = copy_artifact(&artifact, &request.manifest.app_name, &request.job_id, ext)?;
+    Ok(artifact_path)
+}
+
+async fn run_windows_pipeline(
+    request: &BuildRequest,
+    config: &WorkerConfig,
+    cancelled: &Arc<AtomicBool>,
+    progress: &ProgressSender,
+    tmpdir: &std::path::Path,
+    binary_path: &std::path::Path,
+    project_dir: &std::path::Path,
+) -> Result<PathBuf, String> {
+    // Stage 3: Generate assets (ICO)
+    send_stage(progress, StageName::GeneratingAssets, "Generating Windows icon");
+    check_cancelled(cancelled)?;
+    let ico_path = tmpdir.join("app.ico");
+    if let Some(ref icon_name) = request.manifest.icon {
+        let icon_src = project_dir.join(icon_name);
+        if icon_src.exists() {
+            generate_ico(&icon_src, &ico_path)?;
+        }
+    }
+    send_progress(progress, StageName::GeneratingAssets, 100, None);
+
+    // Stage 4: Bundle — scan DLLs and create precompiled bundle
+    send_stage(progress, StageName::Bundling, "Creating precompiled bundle for Windows");
+    check_cancelled(cancelled)?;
+
+    let dll_dir = tmpdir.join("dlls");
+    let copied_dlls = win_package::scan_and_copy_dlls(binary_path, &dll_dir)?;
+    if !copied_dlls.is_empty() {
+        tracing::info!("Bundled {} non-system DLLs", copied_dlls.len());
+    }
+
+    let perry_version = get_perry_version(&config.perry_binary);
+    let ico_opt = if ico_path.exists() { Some(ico_path.as_path()) } else { None };
+    let dll_opt = if dll_dir.exists() { Some(dll_dir.as_path()) } else { None };
+    let bundle_path = win_package::create_precompiled_bundle(
+        &request.manifest,
+        binary_path,
+        ico_opt,
+        dll_opt,
+        &perry_version,
+        tmpdir,
+    )?;
+    send_progress(progress, StageName::Bundling, 100, None);
+
+    // Stage 5: Signing (skipped — Windows worker will sign)
+    send_stage(progress, StageName::Signing, "Skipping signing (deferred to Windows worker)");
+    send_progress(progress, StageName::Signing, 100, None);
+
+    // Copy artifact to stable location
+    let artifact_path = copy_artifact(&bundle_path, &request.manifest.app_name, &request.job_id, "tar.gz")?;
     Ok(artifact_path)
 }
 
@@ -354,12 +427,14 @@ fn copy_artifact(
 enum BuildTarget {
     Linux,
     Android,
+    Windows,
 }
 
 fn determine_target(targets: &[String]) -> BuildTarget {
     for t in targets {
         match t.to_lowercase().as_str() {
             "android" => return BuildTarget::Android,
+            "windows" => return BuildTarget::Windows,
             _ => {}
         }
     }
@@ -425,6 +500,19 @@ fn extract_tarball(tarball_path: &std::path::Path, dest: &std::path::Path) -> Re
     }
 
     Ok(())
+}
+
+fn get_perry_version(perry_binary: &str) -> String {
+    std::process::Command::new(perry_binary)
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|o| {
+            String::from_utf8(o.stdout)
+                .ok()
+                .map(|s| s.trim().to_string())
+        })
+        .unwrap_or_else(|| "unknown".into())
 }
 
 fn base64_decode(input: &str) -> Result<Vec<u8>, String> {

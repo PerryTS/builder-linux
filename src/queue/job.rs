@@ -43,6 +43,19 @@ pub struct BuildManifest {
     pub linux_category: Option<String>,
     #[serde(default)]
     pub linux_description: Option<String>,
+    // Windows-specific fields (pass-through for cross-compiled bundles)
+    #[serde(default)]
+    pub windows_distribute: Option<String>,
+    #[serde(default)]
+    pub windows_uac_level: Option<String>,
+    #[serde(default)]
+    pub windows_dpi_aware: Option<String>,
+    #[serde(default)]
+    pub windows_file_description: Option<String>,
+    #[serde(default)]
+    pub windows_company_name: Option<String>,
+    #[serde(default)]
+    pub windows_copyright: Option<String>,
 }
 
 #[derive(Debug, Zeroize, ZeroizeOnDrop, serde::Deserialize)]

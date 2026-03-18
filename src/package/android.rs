@@ -443,6 +443,12 @@ mod tests {
             linux_format: None,
             linux_category: None,
             linux_description: None,
+            windows_distribute: None,
+            windows_uac_level: None,
+            windows_dpi_aware: None,
+            windows_file_description: None,
+            windows_company_name: None,
+            windows_copyright: None,
         };
 
         let xml = generate_android_manifest_xml(&manifest);
@@ -482,6 +488,12 @@ mod tests {
             linux_format: None,
             linux_category: None,
             linux_description: None,
+            windows_distribute: None,
+            windows_uac_level: None,
+            windows_dpi_aware: None,
+            windows_file_description: None,
+            windows_company_name: None,
+            windows_copyright: None,
         };
 
         let xml = generate_android_manifest_xml(&manifest);
@@ -518,6 +530,12 @@ mod tests {
             linux_format: None,
             linux_category: None,
             linux_description: None,
+            windows_distribute: None,
+            windows_uac_level: None,
+            windows_dpi_aware: None,
+            windows_file_description: None,
+            windows_company_name: None,
+            windows_copyright: None,
         };
 
         let xml = generate_android_manifest_xml(&manifest);

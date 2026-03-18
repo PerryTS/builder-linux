@@ -268,7 +268,7 @@ async fn connect_and_run(config: &WorkerConfig) -> Result<(), String> {
     // Send worker_hello
     let perry_version = get_perry_version(&config.perry_binary);
     let hello = WorkerMessage::WorkerHello {
-        capabilities: vec!["linux".into(), "android".into()],
+        capabilities: vec!["linux".into(), "android".into(), "windows".into()],
         name: config.worker_name.clone().unwrap_or_else(|| {
             hostname::get()
                 .map(|h| h.to_string_lossy().to_string())
@@ -535,7 +535,11 @@ async fn connect_and_run(config: &WorkerConfig) -> Result<(), String> {
                         let metadata = std::fs::metadata(&artifact_path).ok();
                         let size = metadata.map(|m| m.len()).unwrap_or(0);
                         let sha256 = compute_sha256(&artifact_path).unwrap_or_default();
-                        let target = build_target.as_str();
+                        let target = if build_target == "windows" {
+                            "windows-precompiled"
+                        } else {
+                            build_target.as_str()
+                        };
 
                         // Upload artifact to hub via HTTP (hub notifies CLI clients)
                         if let Some(ref upload_url) = artifact_upload_url {
@@ -579,6 +583,7 @@ async fn connect_and_run(config: &WorkerConfig) -> Result<(), String> {
                             "job_id": job_id,
                             "success": true,
                             "duration_secs": duration_secs,
+                            "needs_finishing": if build_target == "windows" { Some("windows") } else { None },
                             "artifacts": [{
                                 "name": artifact_name,
                                 "size": size,
