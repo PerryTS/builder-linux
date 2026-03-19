@@ -259,6 +259,8 @@ pub async fn run_worker(config: WorkerConfig) {
 }
 
 async fn connect_and_run(config: &WorkerConfig) -> Result<(), String> {
+    let azure_config = crate::azure::AzureVmConfig::from_env();
+
     let (ws_stream, _) = connect_async(&config.hub_ws_url)
         .await
         .map_err(|e| format!("Failed to connect to hub: {e}"))?;
@@ -572,6 +574,17 @@ async fn connect_and_run(config: &WorkerConfig) -> Result<(), String> {
                             }))
                             .unwrap();
                             let _ = write.send(Message::Text(artifact_msg.into())).await;
+                        }
+
+                        // Start Azure Windows VM for signing if this is a windows build
+                        if build_target == "windows" {
+                            if let Some(ref azure) = azure_config {
+                                tracing::info!(job_id = %job_id, "Starting Azure Windows VM for signing...");
+                                match crate::azure::start_vm(azure).await {
+                                    Ok(()) => tracing::info!(job_id = %job_id, "Azure VM start triggered"),
+                                    Err(e) => tracing::warn!(job_id = %job_id, "Failed to start Azure VM: {e}"),
+                                }
+                            }
                         }
 
                         // Clean up local artifact file

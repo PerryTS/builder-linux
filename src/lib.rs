@@ -1,3 +1,4 @@
+pub mod azure;
 pub mod build;
 pub mod config;
 pub mod package;
