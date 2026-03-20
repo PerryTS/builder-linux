@@ -94,6 +94,22 @@ pub fn create_android_project(
     std::fs::copy(so_path, jni_dir.join("libperry_app.so"))
         .map_err(|e| format!("Failed to copy .so library: {e}"))?;
 
+    // Copy companion shared libraries (.so) that sit alongside the main binary.
+    // The Perry compiler places these next to the output (e.g. libhone_editor_android.so).
+    if let Some(so_dir) = so_path.parent() {
+        if let Ok(entries) = std::fs::read_dir(so_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.ends_with(".so") && name_str != "libperry_app.so" && name_str.as_ref() != so_path.file_name().unwrap_or_default() {
+                    let dest = jni_dir.join(&*name_str);
+                    std::fs::copy(entry.path(), &dest)
+                        .map_err(|e| format!("Failed to copy companion library {}: {e}", name_str))?;
+                }
+            }
+        }
+    }
+
     // Copy icons into res/
     if let Some(icons) = icons_dir {
         if icons.exists() {
