@@ -236,9 +236,115 @@ async fn run_perry_update(perry_binary: &str) -> (bool, String, Option<String>) 
         }
     }
 
+    // Rebuild Windows .lib files on the Kamatera Windows server and copy them here.
+    // These are needed for cross-compiling Perry apps to Windows from Linux.
+    // We can't cross-compile them locally because of ring/cc-rs dependencies.
+    update_windows_libs(src_dir).await;
+
     let new_version = get_perry_version(perry_binary).unwrap_or_default();
     tracing::info!(version = %new_version, "Perry update complete");
     (true, new_version, None)
+}
+
+/// Rebuild Windows runtime/stdlib/UI libs on the Kamatera Windows server
+/// and copy them to the local cross-compilation target directory.
+async fn update_windows_libs(perry_src_dir: &std::path::Path) {
+    let win_host = std::env::var("PERRY_WINDOWS_BUILD_HOST").unwrap_or_default();
+    let win_user = std::env::var("PERRY_WINDOWS_BUILD_USER").unwrap_or_default();
+    let win_pass = std::env::var("PERRY_WINDOWS_BUILD_PASSWORD").unwrap_or_default();
+    let win_perry_dir = std::env::var("PERRY_WINDOWS_BUILD_DIR")
+        .unwrap_or_else(|_| r"C:\perry-compiler".into());
+
+    if win_host.is_empty() || win_user.is_empty() || win_pass.is_empty() {
+        tracing::info!("Windows build host not configured, skipping Windows .lib update");
+        return;
+    }
+
+    tracing::info!("Rebuilding Windows .lib files on {win_host}...");
+
+    let ssh_cmd = format!(
+        "sshpass -p '{}' ssh -o PubkeyAuthentication=no -o StrictHostKeyChecking=no {}@{}",
+        win_pass, win_user, win_host
+    );
+    let scp_cmd = format!(
+        "sshpass -p '{}' scp -o PubkeyAuthentication=no -o StrictHostKeyChecking=no",
+        win_pass
+    );
+
+    // Pull and rebuild on Windows server
+    let build_cmd = format!(
+        "{} 'set PATH=C:\\Users\\{}\\.cargo\\bin;C:\\Program Files\\Git\\cmd;%PATH% && cd {} && git pull && cargo build --release -p perry-runtime -p perry-stdlib -p perry-ui-windows'",
+        ssh_cmd, win_user, win_perry_dir
+    );
+
+    let build = tokio::process::Command::new("bash")
+        .args(["-c", &build_cmd])
+        .output()
+        .await;
+
+    match &build {
+        Ok(o) if o.status.success() => {
+            tracing::info!("Windows libs rebuilt successfully");
+        }
+        Ok(o) => {
+            tracing::warn!(
+                "Windows lib rebuild failed (non-fatal): {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::warn!("Windows lib rebuild failed (non-fatal): {e}");
+            return;
+        }
+    }
+
+    // Copy libs to local cross-compilation directory
+    let dest_dir = perry_src_dir.join("target/x86_64-pc-windows-msvc/release");
+    if let Err(e) = std::fs::create_dir_all(&dest_dir) {
+        tracing::warn!("Failed to create Windows lib dir: {e}");
+        return;
+    }
+
+    let remote_prefix = format!(
+        "{}@{}:{}/target/release",
+        win_user, win_host, win_perry_dir.replace('\\', "/")
+    );
+
+    for lib in &["perry_runtime.lib", "perry_stdlib.lib", "perry_ui_windows.lib"] {
+        let cp = format!(
+            "{} {}:{}/target/release/{} {}",
+            scp_cmd, win_user, win_host,
+            // SCP with Windows path needs the C: drive letter
+            win_perry_dir.replace('\\', "/"),
+            lib,
+        );
+        // sshpass scp needs the full remote path
+        let cp = format!(
+            "{} '{}@{}:C:/perry-compiler/target/release/{}' '{}'",
+            scp_cmd, win_user, win_host, lib,
+            dest_dir.join(lib).display()
+        );
+
+        let result = tokio::process::Command::new("bash")
+            .args(["-c", &cp])
+            .output()
+            .await;
+
+        match &result {
+            Ok(o) if o.status.success() => {
+                tracing::info!("Copied {lib} from Windows server");
+            }
+            Ok(o) => {
+                tracing::warn!("Failed to copy {lib}: {}", String::from_utf8_lossy(&o.stderr));
+            }
+            Err(e) => {
+                tracing::warn!("Failed to copy {lib}: {e}");
+            }
+        }
+    }
+
+    tracing::info!("Windows .lib files updated");
 }
 
 pub async fn run_worker(config: WorkerConfig) {
