@@ -27,6 +27,10 @@ pub struct BuildManifest {
     pub ios_capabilities: Option<Vec<String>>,
     #[serde(default)]
     pub ios_distribute: Option<String>,
+    #[serde(default)]
+    pub ios_encryption_exempt: Option<bool>,
+    #[serde(default)]
+    pub ios_info_plist: Option<std::collections::HashMap<String, String>>,
     // Android-specific fields
     #[serde(default)]
     pub android_min_sdk: Option<String>,
