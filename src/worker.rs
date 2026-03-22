@@ -246,36 +246,69 @@ async fn run_perry_update(perry_binary: &str) -> (bool, String, Option<String>) 
     (true, new_version, None)
 }
 
-/// Rebuild Windows runtime/stdlib/UI libs on the Kamatera Windows server
+/// Rebuild Windows runtime/stdlib/UI libs on the Windows build server
 /// and copy them to the local cross-compilation target directory.
+/// Uses SSH key auth (PERRY_WINDOWS_BUILD_HOST + PERRY_WINDOWS_BUILD_USER)
+/// or password auth (+ PERRY_WINDOWS_BUILD_PASSWORD) to connect.
 async fn update_windows_libs(perry_src_dir: &std::path::Path) {
     let win_host = std::env::var("PERRY_WINDOWS_BUILD_HOST").unwrap_or_default();
     let win_user = std::env::var("PERRY_WINDOWS_BUILD_USER").unwrap_or_default();
-    let win_pass = std::env::var("PERRY_WINDOWS_BUILD_PASSWORD").unwrap_or_default();
+    let win_pass = std::env::var("PERRY_WINDOWS_BUILD_PASSWORD").ok();
     let win_perry_dir = std::env::var("PERRY_WINDOWS_BUILD_DIR")
-        .unwrap_or_else(|_| r"C:\perry-compiler".into());
+        .unwrap_or_else(|_| "C:/Users/perryadmin/perry-compiler".into());
 
-    if win_host.is_empty() || win_user.is_empty() || win_pass.is_empty() {
+    if win_host.is_empty() || win_user.is_empty() {
         tracing::info!("Windows build host not configured, skipping Windows .lib update");
         return;
     }
 
+    // First, start the Azure VM if configured (it may be deallocated)
+    if let Some(azure) = crate::azure::AzureVmConfig::from_env() {
+        tracing::info!("Starting Azure Windows VM for lib rebuild...");
+        match crate::azure::start_vm(&azure).await {
+            Ok(()) => {
+                tracing::info!("Azure VM start triggered, waiting 90s for boot...");
+                tokio::time::sleep(std::time::Duration::from_secs(90)).await;
+            }
+            Err(e) => tracing::warn!("Failed to start Azure VM (may already be running): {e}"),
+        }
+    }
+
     tracing::info!("Rebuilding Windows .lib files on {win_host}...");
 
-    let ssh_cmd = format!(
-        "sshpass -p '{}' ssh -o PubkeyAuthentication=no -o StrictHostKeyChecking=no {}@{}",
-        win_pass, win_user, win_host
-    );
-    let scp_cmd = format!(
-        "sshpass -p '{}' scp -o PubkeyAuthentication=no -o StrictHostKeyChecking=no",
-        win_pass
-    );
+    // Build SSH/SCP commands (key auth or password auth)
+    let ssh_base = if let Some(ref pass) = win_pass {
+        format!(
+            "sshpass -p '{}' ssh -o PubkeyAuthentication=no -o StrictHostKeyChecking=no",
+            pass
+        )
+    } else {
+        "ssh -o StrictHostKeyChecking=no".into()
+    };
+    let scp_base = if let Some(ref pass) = win_pass {
+        format!(
+            "sshpass -p '{}' scp -o PubkeyAuthentication=no -o StrictHostKeyChecking=no",
+            pass
+        )
+    } else {
+        "scp -o StrictHostKeyChecking=no".into()
+    };
+
+    let remote = format!("{}@{}", win_user, win_host);
+    let win_perry_posix = win_perry_dir.replace('\\', "/");
 
     // Pull and rebuild on Windows server
-    let build_cmd = format!(
-        "{} 'set PATH=C:\\Users\\{}\\.cargo\\bin;C:\\Program Files\\Git\\cmd;%PATH% && cd {} && git pull && cargo build --release -p perry-runtime -p perry-stdlib -p perry-ui-windows'",
-        ssh_cmd, win_user, win_perry_dir
+    // PowerShell commands work over SSH since we set DefaultShell to PowerShell
+    let build_script = format!(
+        concat!(
+            "$env:PATH = 'C:\\Users\\{}\\.cargo\\bin;C:\\Program Files\\Git\\cmd;' + $env:PATH; ",
+            "cd '{}'; ",
+            "git pull; ",
+            "cargo build --release -p perry-runtime -p perry-ui-windows -p perry-stdlib"
+        ),
+        win_user, win_perry_dir
     );
+    let build_cmd = format!("{} {} '{}'", ssh_base, remote, build_script);
 
     let build = tokio::process::Command::new("bash")
         .args(["-c", &build_cmd])
@@ -287,11 +320,15 @@ async fn update_windows_libs(perry_src_dir: &std::path::Path) {
             tracing::info!("Windows libs rebuilt successfully");
         }
         Ok(o) => {
-            tracing::warn!(
-                "Windows lib rebuild failed (non-fatal): {}",
-                String::from_utf8_lossy(&o.stderr)
-            );
-            return;
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            // cargo outputs "Finished" to stderr — check if it actually succeeded
+            if stderr.contains("Finished") || stdout.contains("Finished") {
+                tracing::info!("Windows libs rebuilt successfully");
+            } else {
+                tracing::warn!("Windows lib rebuild failed (non-fatal): {stderr}");
+                return;
+            }
         }
         Err(e) => {
             tracing::warn!("Windows lib rebuild failed (non-fatal): {e}");
@@ -306,23 +343,10 @@ async fn update_windows_libs(perry_src_dir: &std::path::Path) {
         return;
     }
 
-    let remote_prefix = format!(
-        "{}@{}:{}/target/release",
-        win_user, win_host, win_perry_dir.replace('\\', "/")
-    );
-
     for lib in &["perry_runtime.lib", "perry_stdlib.lib", "perry_ui_windows.lib"] {
         let cp = format!(
-            "{} {}:{}/target/release/{} {}",
-            scp_cmd, win_user, win_host,
-            // SCP with Windows path needs the C: drive letter
-            win_perry_dir.replace('\\', "/"),
-            lib,
-        );
-        // sshpass scp needs the full remote path
-        let cp = format!(
-            "{} '{}@{}:C:/perry-compiler/target/release/{}' '{}'",
-            scp_cmd, win_user, win_host, lib,
+            "{} '{}:{}/target/release/{}' '{}'",
+            scp_base, remote, win_perry_posix, lib,
             dest_dir.join(lib).display()
         );
 
