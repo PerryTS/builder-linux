@@ -156,19 +156,45 @@ async fn run_perry_update(perry_binary: &str) -> (bool, String, Option<String>) 
 
     tracing::info!(dir = %src_dir.display(), "Updating perry compiler...");
 
-    let pull = tokio::process::Command::new("git")
-        .arg("pull")
+    // Clean stale git state from interrupted updates
+    let _ = tokio::process::Command::new("find")
+        .args([".git", "-name", "*.lock", "-delete"])
+        .current_dir(src_dir).output().await;
+    let _ = tokio::process::Command::new("rm")
+        .args(["-rf", ".git/refs/remotes/origin", ".git/packed-refs"])
+        .current_dir(src_dir).output().await;
+
+    // Fetch + reset instead of pull to avoid stale ref issues
+    let fetch = tokio::process::Command::new("git")
+        .args(["fetch", "origin"])
         .current_dir(src_dir)
         .output()
         .await;
 
-    match pull {
+    match fetch {
         Ok(ref o) if !o.status.success() => {
             let stderr = String::from_utf8_lossy(&o.stderr).to_string();
-            return (false, String::new(), Some(format!("git pull failed: {stderr}")));
+            return (false, String::new(), Some(format!("git fetch failed: {stderr}")));
         }
         Err(e) => {
-            return (false, String::new(), Some(format!("git pull failed: {e}")));
+            return (false, String::new(), Some(format!("git fetch failed: {e}")));
+        }
+        _ => {}
+    }
+
+    let reset = tokio::process::Command::new("git")
+        .args(["reset", "--hard", "origin/main"])
+        .current_dir(src_dir)
+        .output()
+        .await;
+
+    match reset {
+        Ok(ref o) if !o.status.success() => {
+            let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+            return (false, String::new(), Some(format!("git reset failed: {stderr}")));
+        }
+        Err(e) => {
+            return (false, String::new(), Some(format!("git reset failed: {e}")));
         }
         _ => {}
     }
