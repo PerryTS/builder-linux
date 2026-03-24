@@ -1,3 +1,4 @@
+use crate::config::WorkerConfig;
 use crate::queue::job::BuildManifest;
 use crate::ws::messages::{LogStream, ServerMessage, StageName};
 use std::path::Path;
@@ -12,7 +13,7 @@ pub async fn compile(
     manifest: &BuildManifest,
     progress: &UnboundedSender<ServerMessage>,
     cancelled: &Arc<AtomicBool>,
-    perry_binary: &str,
+    config: &WorkerConfig,
     project_dir: &Path,
     output_path: &Path,
     target: Option<&str>,
@@ -32,13 +33,30 @@ pub async fn compile(
         ));
     }
 
+    if config.docker_enabled {
+        compile_in_docker(manifest, progress, cancelled, config, project_dir, output_path, target).await
+    } else {
+        compile_direct(&config.perry_binary, manifest, progress, cancelled, project_dir, output_path, target).await
+    }
+}
+
+/// Run perry compile directly on the host (no isolation).
+async fn compile_direct(
+    perry_binary: &str,
+    manifest: &BuildManifest,
+    progress: &UnboundedSender<ServerMessage>,
+    cancelled: &Arc<AtomicBool>,
+    project_dir: &Path,
+    output_path: &Path,
+    target: Option<&str>,
+) -> Result<(), String> {
     if target.is_some() {
         setup_target_symlink(perry_binary, project_dir)?;
     }
 
     let mut cmd = Command::new(perry_binary);
     cmd.arg("compile")
-        .arg(&entry)
+        .arg(project_dir.join(&manifest.entry))
         .arg("-o")
         .arg(output_path);
 
@@ -50,9 +68,119 @@ pub async fn compile(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    run_and_stream(cmd, progress, cancelled).await?;
+
+    let ios_app_output = output_path.with_extension("app");
+    if !output_path.exists() && !ios_app_output.exists() {
+        return Err("Compiler produced no output binary".into());
+    }
+
+    Ok(())
+}
+
+/// Run perry compile inside a Docker container for full isolation.
+/// - Project dir mounted read-only
+/// - Output dir mounted writable
+/// - Perry binary + libs mounted read-only from host
+/// - No network access (--network=none)
+/// - Container removed after build (--rm)
+async fn compile_in_docker(
+    manifest: &BuildManifest,
+    progress: &UnboundedSender<ServerMessage>,
+    cancelled: &Arc<AtomicBool>,
+    config: &WorkerConfig,
+    project_dir: &Path,
+    output_path: &Path,
+    target: Option<&str>,
+) -> Result<(), String> {
+    let perry_binary = &config.perry_binary;
+
+    // Resolve perry binary and its parent dirs for mounting
+    let perry_path = std::fs::canonicalize(perry_binary)
+        .map_err(|e| format!("Failed to resolve perry binary path: {e}"))?;
+    let perry_dir = perry_path.parent()
+        .ok_or("Perry binary has no parent directory")?;
+    // The target/ dir with runtime libs is one level up from the bin dir
+    let target_dir = perry_dir.parent()
+        .ok_or("Perry binary directory has no parent")?;
+
+    let canonical_project = project_dir.canonicalize()
+        .map_err(|e| format!("Failed to canonicalize project dir: {e}"))?;
+
+    // Ensure output directory exists on host
+    if let Some(output_parent) = output_path.parent() {
+        std::fs::create_dir_all(output_parent)
+            .map_err(|e| format!("Failed to create output dir: {e}"))?;
+    }
+    let canonical_output_parent = output_path.parent().unwrap()
+        .canonicalize()
+        .map_err(|e| format!("Failed to canonicalize output dir: {e}"))?;
+    let output_filename = output_path.file_name()
+        .ok_or("Output path has no filename")?
+        .to_string_lossy();
+
+    let container_project = "/build/project";
+    let container_output_dir = "/build/output";
+    let container_perry = "/perry/bin/perry";
+    let container_target = "/perry/target";
+    let container_entry = format!("{}/{}", container_project, manifest.entry);
+    let container_output = format!("{}/{}", container_output_dir, output_filename);
+
+    let mut cmd = Command::new("docker");
+    cmd.arg("run")
+        .arg("--rm")
+        .arg("--network=none")
+        // Memory limit to prevent abuse
+        .arg("--memory=4g")
+        .arg("--memory-swap=4g")
+        // CPU limit
+        .arg("--cpus=2")
+        // No new privileges
+        .arg("--security-opt").arg("no-new-privileges")
+        // Mount project read-only
+        .arg("-v").arg(format!("{}:{}:ro", canonical_project.display(), container_project))
+        // Mount output dir writable
+        .arg("-v").arg(format!("{}:{}:rw", canonical_output_parent.display(), container_output_dir))
+        // Mount perry binary read-only
+        .arg("-v").arg(format!("{}:{}:ro", perry_path.display(), container_perry))
+        // Mount perry target dir (contains runtime libs) read-only
+        .arg("-v").arg(format!("{}:{}:ro", target_dir.display(), container_target))
+        // Set working directory to project
+        .arg("-w").arg(container_project)
+        // Use the build image
+        .arg(&config.docker_image)
+        // Run perry compile
+        .arg(container_perry)
+        .arg("compile")
+        .arg(&container_entry)
+        .arg("-o")
+        .arg(&container_output);
+
+    if let Some(t) = target {
+        cmd.arg("--target").arg(t);
+    }
+
+    cmd.stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    run_and_stream(cmd, progress, cancelled).await?;
+
+    if !output_path.exists() {
+        return Err("Compiler produced no output binary".into());
+    }
+
+    Ok(())
+}
+
+/// Spawn a command, stream stdout/stderr to progress, wait for completion.
+async fn run_and_stream(
+    mut cmd: Command,
+    progress: &UnboundedSender<ServerMessage>,
+    cancelled: &Arc<AtomicBool>,
+) -> Result<(), String> {
     let mut child = cmd
         .spawn()
-        .map_err(|e| format!("Failed to spawn perry: {e}"))?;
+        .map_err(|e| format!("Failed to spawn process: {e}"))?;
 
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
@@ -94,7 +222,7 @@ pub async fn compile(
     let status = child
         .wait()
         .await
-        .map_err(|e| format!("Failed to wait for perry: {e}"))?;
+        .map_err(|e| format!("Failed to wait for process: {e}"))?;
 
     let stdout_lines = stdout_task.await.unwrap_or_default();
     let stderr_lines = stderr_task.await.unwrap_or_default();
@@ -115,11 +243,6 @@ pub async fn compile(
             err_detail.push_str(&format!("\n{}", stdout_lines.join("\n")));
         }
         return Err(err_detail);
-    }
-
-    let ios_app_output = output_path.with_extension("app");
-    if !output_path.exists() && !ios_app_output.exists() {
-        return Err("Compiler produced no output binary".into());
     }
 
     Ok(())

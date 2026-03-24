@@ -8,6 +8,10 @@ pub struct WorkerConfig {
     pub android_ndk_home: Option<String>,
     pub worker_name: Option<String>,
     pub hub_secret: Option<String>,
+    /// When true, compile steps run inside a Docker container for isolation.
+    pub docker_enabled: bool,
+    /// Docker image to use for isolated builds (default: "perry-build")
+    pub docker_image: String,
 }
 
 impl WorkerConfig {
@@ -25,6 +29,11 @@ impl WorkerConfig {
                 .ok(),
             worker_name: env::var("PERRY_WORKER_NAME").ok(),
             hub_secret: env::var("PERRY_HUB_WORKER_SECRET").ok(),
+            docker_enabled: env::var("PERRY_DOCKER_ENABLED")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false),
+            docker_image: env::var("PERRY_DOCKER_IMAGE")
+                .unwrap_or_else(|_| "perry-build".into()),
         }
     }
 }

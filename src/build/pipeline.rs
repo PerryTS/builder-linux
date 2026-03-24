@@ -82,7 +82,7 @@ async fn run_pipeline(
         &request.manifest,
         progress,
         cancelled,
-        &config.perry_binary,
+        config,
         &project_dir,
         &binary_path,
         compiler_target,
