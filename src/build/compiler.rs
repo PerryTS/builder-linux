@@ -137,8 +137,9 @@ async fn compile_in_docker(
         .arg("--cpus=2")
         // No new privileges
         .arg("--security-opt").arg("no-new-privileges")
-        // Mount project read-only
-        .arg("-v").arg(format!("{}:{}:ro", canonical_project.display(), container_project))
+        // Mount project writable (perry writes .o files during compilation;
+        // the project dir is a temp copy that gets cleaned up after the build)
+        .arg("-v").arg(format!("{}:{}", canonical_project.display(), container_project))
         // Mount output dir writable
         .arg("-v").arg(format!("{}:{}:rw", canonical_output_parent.display(), container_output_dir))
         // Mount perry binary read-only
