@@ -137,6 +137,9 @@ async fn compile_in_docker(
         .arg("--cpus=2")
         // No new privileges
         .arg("--security-opt").arg("no-new-privileges")
+        // Run as root inside the container (project dir is owned by root on host;
+        // isolation comes from network=none + read-only mounts, not user separation)
+        .arg("--user").arg("0:0")
         // Mount project writable (perry writes .o files during compilation;
         // the project dir is a temp copy that gets cleaned up after the build)
         .arg("-v").arg(format!("{}:{}", canonical_project.display(), container_project))
