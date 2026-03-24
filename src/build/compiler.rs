@@ -152,6 +152,12 @@ async fn compile_in_docker(
         .arg("-v").arg(format!("{}:{}:ro", perry_dir.display(), container_perry_dir))
         // Mount parent target dir for cross-compilation target libs
         .arg("-v").arg(format!("{}:/perry/target:ro", target_dir.display()))
+        // Mount Rust toolchain so native library builds work (cargo build inside projects)
+        .arg("-v").arg(format!("{}:/rust/rustup:ro", std::env::var("RUSTUP_HOME").unwrap_or_else(|_| format!("{}/.rustup", std::env::var("HOME").unwrap_or_else(|_| "/root".into())))))
+        .arg("-v").arg(format!("{}:/rust/cargo:ro", std::env::var("CARGO_HOME").unwrap_or_else(|_| format!("{}/.cargo", std::env::var("HOME").unwrap_or_else(|_| "/root".into())))))
+        .arg("-e").arg("RUSTUP_HOME=/rust/rustup")
+        .arg("-e").arg("CARGO_HOME=/tmp/cargo-home")
+        .arg("-e").arg("PATH=/rust/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
         // Set working directory to project
         .arg("-w").arg(container_project)
         // Use the build image
