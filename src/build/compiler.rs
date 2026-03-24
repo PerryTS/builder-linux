@@ -132,7 +132,9 @@ async fn compile_in_docker(
     let mut cmd = Command::new("docker");
     cmd.arg("run")
         .arg("--rm")
-        .arg("--network=none")
+        // Allow network for native lib cargo builds (crate downloads from crates.io).
+        // Isolation relies on read-only mounts + resource limits + no-new-privileges.
+        .arg("--network=host")
         // Memory limit to prevent abuse
         .arg("--memory=4g")
         .arg("--memory-swap=4g")
