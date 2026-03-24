@@ -95,12 +95,13 @@ async fn compile_in_docker(
 ) -> Result<(), String> {
     let perry_binary = &config.perry_binary;
 
-    // Resolve perry binary and its parent dirs for mounting
+    // Resolve perry binary and its directory (which also contains runtime libs)
     let perry_path = std::fs::canonicalize(perry_binary)
         .map_err(|e| format!("Failed to resolve perry binary path: {e}"))?;
     let perry_dir = perry_path.parent()
         .ok_or("Perry binary has no parent directory")?;
-    // The target/ dir with runtime libs is one level up from the bin dir
+    // The target/ dir is one level up — mount it so find_library can resolve
+    // libs from exe.parent().parent()/target/<triple>/release/
     let target_dir = perry_dir.parent()
         .ok_or("Perry binary directory has no parent")?;
 
@@ -121,8 +122,10 @@ async fn compile_in_docker(
 
     let container_project = "/build/project";
     let container_output_dir = "/build/output";
-    let container_perry = "/perry/bin/perry";
-    let container_target = "/perry/target";
+    // Mount the entire perry release dir (contains binary + runtime libs)
+    // so find_library can resolve libs from exe.parent().join(name)
+    let container_perry_dir = "/perry/release";
+    let container_perry = format!("{}/perry", container_perry_dir);
     let container_entry = format!("{}/{}", container_project, manifest.entry);
     let container_output = format!("{}/{}", container_output_dir, output_filename);
 
@@ -145,10 +148,10 @@ async fn compile_in_docker(
         .arg("-v").arg(format!("{}:{}", canonical_project.display(), container_project))
         // Mount output dir writable
         .arg("-v").arg(format!("{}:{}:rw", canonical_output_parent.display(), container_output_dir))
-        // Mount perry binary read-only
-        .arg("-v").arg(format!("{}:{}:ro", perry_path.display(), container_perry))
-        // Mount perry target dir (contains runtime libs) read-only
-        .arg("-v").arg(format!("{}:{}:ro", target_dir.display(), container_target))
+        // Mount perry release dir read-only (binary + all .a/.lib files)
+        .arg("-v").arg(format!("{}:{}:ro", perry_dir.display(), container_perry_dir))
+        // Mount parent target dir for cross-compilation target libs
+        .arg("-v").arg(format!("{}:/perry/target:ro", target_dir.display()))
         // Set working directory to project
         .arg("-w").arg(container_project)
         // Use the build image
