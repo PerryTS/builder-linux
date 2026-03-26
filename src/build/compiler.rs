@@ -159,7 +159,9 @@ async fn compile_in_docker(
         .arg("-v").arg(format!("{}:/rust/cargo:ro", std::env::var("CARGO_HOME").unwrap_or_else(|_| format!("{}/.cargo", std::env::var("HOME").unwrap_or_else(|_| "/root".into())))))
         .arg("-e").arg("RUSTUP_HOME=/rust/rustup")
         .arg("-e").arg("CARGO_HOME=/tmp/cargo-home")
-        .arg("-e").arg("PATH=/usr/local/bin:/rust/cargo/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin");
+        .arg("-e").arg("PATH=/usr/local/bin:/rust/cargo/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin")
+        // Rust toolchain's shared libraries (libLLVM.so needed by lld-link/rust-lld)
+        .arg("-e").arg("LD_LIBRARY_PATH=/rust/rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib");
 
     // Pass through build environment variables needed for cross-compilation
     for var in &[
