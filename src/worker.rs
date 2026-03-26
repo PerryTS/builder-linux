@@ -142,6 +142,17 @@ fn get_perry_version(perry_binary: &str) -> Option<String> {
 
 /// Run the perry update process: git pull + cargo build.
 async fn run_perry_update(perry_binary: &str) -> (bool, String, Option<String>) {
+    // Prevent concurrent updates
+    let lock_path = std::env::temp_dir().join("perry-update.lock");
+    if lock_path.exists() {
+        tracing::info!("Update already in progress, skipping");
+        return (false, String::new(), Some("Update already in progress".into()));
+    }
+    let _ = std::fs::write(&lock_path, "");
+    struct LockGuard(std::path::PathBuf);
+    impl Drop for LockGuard { fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); } }
+    let _lock = LockGuard(lock_path);
+
     let src_dir = std::path::Path::new(perry_binary)
         .parent()
         .and_then(|p| p.parent())
