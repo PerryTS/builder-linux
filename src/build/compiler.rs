@@ -150,10 +150,10 @@ async fn compile_in_docker(
         .arg("-v").arg(format!("{}:{}", canonical_project.display(), container_project))
         // Mount output dir writable
         .arg("-v").arg(format!("{}:{}:rw", canonical_output_parent.display(), container_output_dir))
-        // Mount perry release dir read-only (binary + all .a/.lib files)
-        .arg("-v").arg(format!("{}:{}:ro", perry_dir.display(), container_perry_dir))
-        // Mount parent target dir for cross-compilation target libs
-        .arg("-v").arg(format!("{}:/perry/target:ro", target_dir.display()))
+        // Mount the entire target dir at /perry — this makes the binary at
+        // /perry/release/perry and cross-compilation libs at /perry/{triple}/release/
+        // which matches how find_library resolves paths via exe.parent().parent()
+        .arg("-v").arg(format!("{}:/perry:ro", target_dir.display()))
         // Mount Rust toolchain so native library builds work (cargo build inside projects)
         .arg("-v").arg(format!("{}:/rust/rustup:ro", std::env::var("RUSTUP_HOME").unwrap_or_else(|_| format!("{}/.rustup", std::env::var("HOME").unwrap_or_else(|_| "/root".into())))))
         .arg("-v").arg(format!("{}:/rust/cargo:ro", std::env::var("CARGO_HOME").unwrap_or_else(|_| format!("{}/.cargo", std::env::var("HOME").unwrap_or_else(|_| "/root".into())))))
