@@ -164,6 +164,10 @@ async fn compile_in_docker(
         .arg("-e").arg("LD_LIBRARY_PATH=/rust/rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib");
 
     // Pass through build environment variables needed for cross-compilation
+    // Set cargo linker for Android target so native lib builds use NDK linker, not host ld
+    if let Ok(cc) = std::env::var("CC_aarch64_linux_android") {
+        cmd.arg("-e").arg(format!("CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER={cc}"));
+    }
     for var in &[
         "ANDROID_HOME", "ANDROID_SDK_ROOT", "ANDROID_NDK_HOME",
         "PERRY_WINDOWS_SYSROOT",
