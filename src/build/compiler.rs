@@ -159,7 +159,38 @@ async fn compile_in_docker(
         .arg("-v").arg(format!("{}:/rust/cargo:ro", std::env::var("CARGO_HOME").unwrap_or_else(|_| format!("{}/.cargo", std::env::var("HOME").unwrap_or_else(|_| "/root".into())))))
         .arg("-e").arg("RUSTUP_HOME=/rust/rustup")
         .arg("-e").arg("CARGO_HOME=/tmp/cargo-home")
-        .arg("-e").arg("PATH=/rust/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+        .arg("-e").arg("PATH=/usr/local/bin:/rust/cargo/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin");
+
+    // Pass through build environment variables needed for cross-compilation
+    for var in &[
+        "ANDROID_HOME", "ANDROID_SDK_ROOT", "ANDROID_NDK_HOME",
+        "PERRY_WINDOWS_SYSROOT",
+        "CC_aarch64_linux_android", "AR_aarch64_linux_android",
+    ] {
+        if let Ok(val) = std::env::var(var) {
+            cmd.arg("-e").arg(format!("{var}={val}"));
+        }
+    }
+
+    // Mount Android NDK if configured (needed for Android cross-compilation)
+    if let Ok(ndk) = std::env::var("ANDROID_NDK_HOME") {
+        cmd.arg("-v").arg(format!("{ndk}:{ndk}:ro"));
+    }
+    // Mount Windows sysroot if configured
+    if let Ok(sysroot) = std::env::var("PERRY_WINDOWS_SYSROOT") {
+        cmd.arg("-v").arg(format!("{sysroot}:{sysroot}:ro"));
+    }
+    // Mount lld-link if it exists
+    if let Ok(output) = std::process::Command::new("which").arg("lld-link").output() {
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() {
+                cmd.arg("-v").arg(format!("{path}:{path}:ro"));
+            }
+        }
+    }
+
+    cmd
         // Set working directory to project
         .arg("-w").arg(container_project)
         // Use the build image
