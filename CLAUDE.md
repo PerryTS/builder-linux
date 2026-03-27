@@ -54,15 +54,42 @@ PERRY_BUILD_PERRY_BINARY=~/projects/perry/target/release/perry ./target/release/
 - **tar.gz** — no external tools needed
 
 ## Worker Capabilities
-This worker advertises `["linux", "android"]` to the hub. The hub routes
-jobs to workers based on matching target capabilities.
+Advertises `["linux", "android", "windows"]` to the hub. Windows builds are
+cross-compiled using `lld-link` + xwin sysroot, producing a precompiled bundle
+that the hub re-queues to a Windows sign worker.
+
+## Concurrent Builds
+Supports running multiple builds in parallel (default 2, via `PERRY_MAX_CONCURRENT_BUILDS`).
+Each build runs in its own Docker container (when `PERRY_DOCKER_ENABLED=true`).
+Builds are spawned as tokio tasks with a shared WS write channel.
+
+## Docker Isolation
+When enabled (`PERRY_DOCKER_ENABLED=true`), builds run in Docker containers:
+- Project dir mounted writable (perry writes .o files during compilation)
+- Perry binary + libs mounted read-only from `/opt/perry-src/target/`
+- Rust toolchain mounted read-only
+- Resource limits: 4GB RAM, 2 CPUs, no-new-privileges
+- Network enabled (`--network=host`) for native lib cargo builds
+
+## Windows Cross-Compilation
+- Uses `lld-link` (LLVM's MSVC-compatible linker) via Rust toolchain
+- xwin sysroot at `PERRY_WINDOWS_SYSROOT` for Windows SDK import libraries
+- `strip_duplicate_objects_from_lib` removes perry_runtime duplicates from UI staticlibs using rlib
+- rlib for `perry-ui-windows` built locally during `update_perry` (cross-compile works for this crate)
+- Windows .lib files (perry_stdlib, perry_runtime) copied from Azure VM via `update_windows_libs`
+
+## Additional Environment Variables
+- `PERRY_MAX_CONCURRENT_BUILDS` — Max parallel builds (default: 2)
+- `PERRY_DOCKER_ENABLED` — Enable Docker isolation (default: false)
+- `PERRY_DOCKER_IMAGE` — Docker image name (default: perry-build)
+- `PERRY_WINDOWS_SYSROOT` — Path to xwin Windows SDK sysroot
 
 ## How It Works
-1. Worker connects to hub WebSocket, sends `worker_hello` with capabilities
-2. Hub assigns jobs -> worker receives `job_assign` with manifest + tarball path
-3. Worker runs build pipeline: compile -> package -> (optional) sign -> (optional) publish
-4. Progress/logs streamed back to hub in real-time via WS
-5. Finished artifacts registered with hub for CLI download
+1. Worker connects to hub WebSocket, sends `worker_hello` with capabilities + `max_concurrent`
+2. Hub assigns jobs → worker receives `job_assign`, spawns build as async task
+3. Each build: download tarball → compile (in Docker if enabled) → package → sign → upload
+4. For Windows: cross-compile → create precompiled bundle → hub re-queues to sign worker
+5. Progress/logs streamed via shared WS channel, multiple builds run concurrently
 
 ## Related Repos
 - [hub](https://github.com/PerryTS/hub) — the hub server this worker connects to
