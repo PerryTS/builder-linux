@@ -186,14 +186,26 @@ async fn compile_in_docker(
     if let Ok(sysroot) = std::env::var("PERRY_WINDOWS_SYSROOT") {
         cmd.arg("-v").arg(format!("{sysroot}:{sysroot}:ro"));
     }
-    // Mount lld-link if it exists
-    if let Ok(output) = std::process::Command::new("which").arg("lld-link").output() {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
-                cmd.arg("-v").arg(format!("{path}:{path}:ro"));
+    // Mount lld-link and ld64.lld if they exist (for Windows/Apple cross-compilation)
+    for tool in &["lld-link", "ld64.lld"] {
+        if let Ok(output) = std::process::Command::new("which").arg(tool).output() {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    cmd.arg("-v").arg(format!("{path}:{path}:ro"));
+                }
             }
         }
+    }
+
+    // Mount Apple SDK sysroot if configured (for iOS/macOS cross-compilation)
+    if let Ok(sysroot) = std::env::var("PERRY_IOS_SYSROOT") {
+        cmd.arg("-v").arg(format!("{sysroot}:{sysroot}:ro"));
+        cmd.arg("-e").arg(format!("PERRY_IOS_SYSROOT={sysroot}"));
+    }
+    if let Ok(sysroot) = std::env::var("PERRY_MACOS_SYSROOT") {
+        cmd.arg("-v").arg(format!("{sysroot}:{sysroot}:ro"));
+        cmd.arg("-e").arg(format!("PERRY_MACOS_SYSROOT={sysroot}"));
     }
 
     cmd
