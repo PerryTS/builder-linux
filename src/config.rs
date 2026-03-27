@@ -12,6 +12,8 @@ pub struct WorkerConfig {
     pub docker_enabled: bool,
     /// Docker image to use for isolated builds (default: "perry-build")
     pub docker_image: String,
+    /// Max concurrent builds (default 2).
+    pub max_concurrent_builds: usize,
 }
 
 impl WorkerConfig {
@@ -34,6 +36,10 @@ impl WorkerConfig {
                 .unwrap_or(false),
             docker_image: env::var("PERRY_DOCKER_IMAGE")
                 .unwrap_or_else(|_| "perry-build".into()),
+            max_concurrent_builds: env::var("PERRY_MAX_CONCURRENT_BUILDS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(2),
         }
     }
 }
