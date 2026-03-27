@@ -301,6 +301,32 @@ async fn run_perry_update(perry_binary: &str) -> (bool, String, Option<String>) 
         }
     }
 
+    // Build iOS-targeted libraries (perry-runtime, perry-ui-ios, perry-stdlib)
+    // perry-runtime and perry-ui-ios cross-compile fine from Linux.
+    // perry-stdlib fails due to ring/cc-rs needing xcrun — copy from Mac instead.
+    for (pkg, target_triple) in &[
+        ("perry-runtime", "aarch64-apple-ios"),
+        ("perry-ui-ios", "aarch64-apple-ios"),
+    ] {
+        let ios_build = tokio::process::Command::new(&cargo)
+            .args(["build", "--release", "-p", pkg, "--target", target_triple])
+            .current_dir(src_dir)
+            .output()
+            .await;
+        match &ios_build {
+            Ok(o) if o.status.success() => {
+                tracing::info!("Built {pkg} for {target_triple}");
+            }
+            Ok(o) => {
+                tracing::warn!("{pkg} iOS build failed (non-fatal): {}",
+                    String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or(""));
+            }
+            Err(e) => {
+                tracing::warn!("{pkg} iOS build failed (non-fatal): {e}");
+            }
+        }
+    }
+
     let new_version = get_perry_version(perry_binary).unwrap_or_default();
     tracing::info!(version = %new_version, "Perry update complete");
     (true, new_version, None)
