@@ -301,21 +301,21 @@ async fn run_perry_update(perry_binary: &str) -> (bool, String, Option<String>) 
         }
     }
 
-    // Build iOS-targeted libraries (perry-runtime, perry-ui-ios, perry-stdlib)
-    // perry-runtime and perry-ui-ios cross-compile fine from Linux.
-    // perry-stdlib fails due to ring/cc-rs needing xcrun — copy from Mac instead.
-    for (pkg, target_triple) in &[
-        ("perry-runtime", "aarch64-apple-ios"),
-        ("perry-ui-ios", "aarch64-apple-ios"),
-    ] {
-        let ios_build = tokio::process::Command::new(&cargo)
-            .args(["build", "--release", "-p", pkg, "--target", target_triple])
+    // Build iOS-targeted libraries (all cross-compile from Linux)
+    // ring/cc-rs needs CC + SDKROOT env vars to find Apple SDK headers
+    let ios_sysroot = std::env::var("PERRY_IOS_SYSROOT")
+        .unwrap_or_else(|_| "/opt/apple-sysroot/ios".to_string());
+    for pkg in &["perry-runtime", "perry-ui-ios", "perry-stdlib"] {
+        let mut ios_cmd = tokio::process::Command::new(&cargo);
+        ios_cmd.args(["build", "--release", "-p", pkg, "--target", "aarch64-apple-ios"])
             .current_dir(src_dir)
-            .output()
-            .await;
+            .env("CC_aarch64_apple_ios", "clang")
+            .env("CFLAGS_aarch64_apple_ios", format!("--target=arm64-apple-ios17.0 -isysroot {ios_sysroot}"))
+            .env("SDKROOT", &ios_sysroot);
+        let ios_build = ios_cmd.output().await;
         match &ios_build {
             Ok(o) if o.status.success() => {
-                tracing::info!("Built {pkg} for {target_triple}");
+                tracing::info!("Built {pkg} for aarch64-apple-ios");
             }
             Ok(o) => {
                 tracing::warn!("{pkg} iOS build failed (non-fatal): {}",
