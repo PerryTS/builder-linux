@@ -469,46 +469,73 @@ async fn run_ios_pipeline(
         std::fs::copy(&icon_1024, app_path.join("AppIcon.png")).ok();
     }
 
-    // Generate Info.plist
+    // Generate Info.plist with all Apple-required DT* keys
     let bundle_id = if request.manifest.bundle_id.is_empty() { "com.example.app" } else { &request.manifest.bundle_id };
     let version = request.manifest.short_version.as_deref()
         .or(Some(&request.manifest.version))
         .unwrap_or("1.0.0");
-    let build_number = request.manifest.version.as_str(); // version field is used as build number
+    let build_number = request.manifest.version.as_str();
+    let encryption_exempt = if request.manifest.ios_encryption_exempt.unwrap_or(false) {
+        "\n    <key>ITSAppUsesNonExemptEncryption</key>\n    <false/>"
+    } else { "" };
     let info_plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key>
-    <string>{}</string>
+    <string>{app_name}</string>
     <key>CFBundleIdentifier</key>
-    <string>{}</string>
+    <string>{bundle_id}</string>
     <key>CFBundleName</key>
-    <string>{}</string>
+    <string>{app_name}</string>
+    <key>CFBundleDisplayName</key>
+    <string>{app_name}</string>
     <key>CFBundleShortVersionString</key>
-    <string>{}</string>
+    <string>{version}</string>
     <key>CFBundleVersion</key>
-    <string>{}</string>
+    <string>{build_number}</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
     <key>MinimumOSVersion</key>
     <string>17.0</string>
     <key>CFBundleSupportedPlatforms</key>
     <array><string>iPhoneOS</string></array>
+    <key>DTPlatformName</key>
+    <string>iphoneos</string>
+    <key>DTPlatformVersion</key>
+    <string>18.0</string>
+    <key>DTSDKName</key>
+    <string>iphoneos18.0</string>
+    <key>DTSDKBuild</key>
+    <string>22A3351</string>
+    <key>DTXcode</key>
+    <string>1600</string>
+    <key>DTXcodeBuild</key>
+    <string>16A242d</string>
+    <key>DTCompiler</key>
+    <string>com.apple.compilers.llvm.clang.1_0</string>
     <key>UIDeviceFamily</key>
     <array><integer>1</integer><integer>2</integer></array>
     <key>UILaunchScreen</key>
     <dict/>
+    <key>UIRequiredDeviceCapabilities</key>
+    <array><string>arm64</string></array>
     <key>UISupportedInterfaceOrientations</key>
     <array>
         <string>UIInterfaceOrientationPortrait</string>
         <string>UIInterfaceOrientationLandscapeLeft</string>
         <string>UIInterfaceOrientationLandscapeRight</string>
-    </array>
+    </array>{encryption_exempt}
 </dict>
 </plist>"#,
-        request.manifest.app_name, bundle_id, request.manifest.app_name, version, build_number
+        app_name = request.manifest.app_name,
+        bundle_id = bundle_id,
+        version = version,
+        build_number = build_number,
+        encryption_exempt = encryption_exempt,
     );
     std::fs::write(app_path.join("Info.plist"), &info_plist)
         .map_err(|e| format!("Failed to write Info.plist: {e}"))?;
