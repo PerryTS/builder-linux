@@ -301,29 +301,42 @@ async fn run_perry_update(perry_binary: &str) -> (bool, String, Option<String>) 
         }
     }
 
-    // Build iOS-targeted libraries (all cross-compile from Linux)
+    // Build Apple-targeted libraries (all cross-compile from Linux)
     // ring/cc-rs needs CC + SDKROOT env vars to find Apple SDK headers
     let ios_sysroot = std::env::var("PERRY_IOS_SYSROOT")
         .unwrap_or_else(|_| "/opt/apple-sysroot/ios".to_string());
+    let macos_sysroot = std::env::var("PERRY_MACOS_SYSROOT")
+        .unwrap_or_else(|_| "/opt/apple-sysroot/macos".to_string());
+
+    // iOS libs
     for pkg in &["perry-runtime", "perry-ui-ios", "perry-stdlib"] {
-        let mut ios_cmd = tokio::process::Command::new(&cargo);
-        ios_cmd.args(["build", "--release", "-p", pkg, "--target", "aarch64-apple-ios"])
+        let mut cmd = tokio::process::Command::new(&cargo);
+        cmd.args(["build", "--release", "-p", pkg, "--target", "aarch64-apple-ios"])
             .current_dir(src_dir)
             .env("CC_aarch64_apple_ios", "clang")
             .env("CFLAGS_aarch64_apple_ios", format!("--target=arm64-apple-ios17.0 -isysroot {ios_sysroot}"))
             .env("SDKROOT", &ios_sysroot);
-        let ios_build = ios_cmd.output().await;
-        match &ios_build {
-            Ok(o) if o.status.success() => {
-                tracing::info!("Built {pkg} for aarch64-apple-ios");
-            }
-            Ok(o) => {
-                tracing::warn!("{pkg} iOS build failed (non-fatal): {}",
-                    String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or(""));
-            }
-            Err(e) => {
-                tracing::warn!("{pkg} iOS build failed (non-fatal): {e}");
-            }
+        match cmd.output().await {
+            Ok(o) if o.status.success() => tracing::info!("Built {pkg} for aarch64-apple-ios"),
+            Ok(o) => tracing::warn!("{pkg} iOS build failed (non-fatal): {}",
+                String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("")),
+            Err(e) => tracing::warn!("{pkg} iOS build failed (non-fatal): {e}"),
+        }
+    }
+
+    // macOS libs
+    for pkg in &["perry-runtime", "perry-ui-macos", "perry-stdlib"] {
+        let mut cmd = tokio::process::Command::new(&cargo);
+        cmd.args(["build", "--release", "-p", pkg, "--target", "aarch64-apple-darwin"])
+            .current_dir(src_dir)
+            .env("CC_aarch64_apple_darwin", "clang")
+            .env("CFLAGS_aarch64_apple_darwin", format!("--target=arm64-apple-macos13.0 -isysroot {macos_sysroot}"))
+            .env("SDKROOT", &macos_sysroot);
+        match cmd.output().await {
+            Ok(o) if o.status.success() => tracing::info!("Built {pkg} for aarch64-apple-darwin"),
+            Ok(o) => tracing::warn!("{pkg} macOS build failed (non-fatal): {}",
+                String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("")),
+            Err(e) => tracing::warn!("{pkg} macOS build failed (non-fatal): {e}"),
         }
     }
 
