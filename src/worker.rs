@@ -460,7 +460,7 @@ async fn connect_and_run(config: &WorkerConfig) -> Result<(), String> {
     // Send worker_hello
     let perry_version = get_perry_version(&config.perry_binary);
     let hello = WorkerMessage::WorkerHello {
-        capabilities: vec!["linux".into(), "android".into(), "windows".into()],
+        capabilities: vec!["linux".into(), "android".into(), "windows".into(), "ios".into(), "macos".into()],
         name: config.worker_name.clone().unwrap_or_else(|| {
             hostname::get()
                 .map(|h| h.to_string_lossy().to_string())
@@ -723,7 +723,12 @@ async fn handle_build(
             let metadata = std::fs::metadata(&artifact_path).ok();
             let size = metadata.map(|m| m.len()).unwrap_or(0);
             let sha256 = compute_sha256(&artifact_path).unwrap_or_default();
-            let target = if build_target == "windows" { "windows-precompiled" } else { build_target.as_str() };
+            let target = match build_target.as_str() {
+                "windows" => "windows-precompiled",
+                "ios" => "ios-precompiled",
+                "macos" => "macos-precompiled",
+                other => other,
+            };
 
             if let Some(ref upload_url) = artifact_upload_url {
                 match upload_artifact(upload_url, &artifact_path, &artifact_name, &sha256, target, auth_token.as_deref()).await {
@@ -756,7 +761,12 @@ async fn handle_build(
 
             let complete = serde_json::to_string(&serde_json::json!({
                 "type": "complete", "job_id": job_id, "success": true, "duration_secs": duration_secs,
-                "needs_finishing": if build_target == "windows" { Some("windows") } else { None },
+                "needs_finishing": match build_target.as_str() {
+                    "windows" => Some("windows"),
+                    "ios" => Some("ios"),
+                    "macos" => Some("macos"),
+                    _ => None,
+                },
                 "artifacts": [{"name": artifact_name, "size": size, "sha256": sha256}]
             })).unwrap();
             let _ = ws_tx.send(Message::Text(complete.into()));

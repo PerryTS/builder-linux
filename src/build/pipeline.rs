@@ -76,6 +76,8 @@ async fn run_pipeline(
     let compiler_target = match target {
         BuildTarget::Android => Some("android"),
         BuildTarget::Windows => Some("windows"),
+        BuildTarget::Ios => Some("ios"),
+        BuildTarget::Macos => Some("macos"),
         BuildTarget::Linux => None, // native compilation on Linux host
     };
     compiler::compile(
@@ -89,25 +91,22 @@ async fn run_pipeline(
     )
     .await?;
 
-    let actual_binary = match target {
-        BuildTarget::Android => {
-            if !binary_path.exists() {
-                return Err("Compiler produced no output .so library".into());
-            }
+    // For iOS, the compiler may produce a .app directory instead of a flat binary
+    let actual_binary = if target == BuildTarget::Ios {
+        let app_output = binary_path.with_extension("app");
+        let inner = app_output.join(&request.manifest.app_name);
+        if inner.exists() {
+            inner
+        } else if binary_path.exists() {
             binary_path.clone()
+        } else {
+            return Err("Compiler produced no output binary for iOS".into());
         }
-        BuildTarget::Windows => {
-            if !binary_path.exists() {
-                return Err("Compiler produced no output .exe binary".into());
-            }
-            binary_path.clone()
+    } else {
+        if !binary_path.exists() {
+            return Err(format!("Compiler produced no output binary at {}", binary_path.display()));
         }
-        BuildTarget::Linux => {
-            if !binary_path.exists() {
-                return Err("Compiler produced no output binary".into());
-            }
-            binary_path.clone()
-        }
+        binary_path.clone()
     };
     send_progress(progress, StageName::Compiling, 100, None);
 
@@ -122,6 +121,14 @@ async fn run_pipeline(
         }
         BuildTarget::Windows => {
             run_windows_pipeline(request, config, cancelled, progress, tmpdir, &actual_binary, &project_dir)
+                .await
+        }
+        BuildTarget::Ios => {
+            run_ios_pipeline(request, cancelled, progress, tmpdir, &actual_binary, &project_dir)
+                .await
+        }
+        BuildTarget::Macos => {
+            run_macos_pipeline(request, cancelled, progress, tmpdir, &actual_binary, &project_dir)
                 .await
         }
     }
@@ -408,6 +415,261 @@ async fn run_android_pipeline(
 }
 
 /// Copy artifact to a stable location (outside the build tmpdir that gets cleaned up)
+/// iOS cross-compilation pipeline: compile → create .app bundle → create .ipa
+/// Signing + App Store upload deferred to Mac worker.
+async fn run_ios_pipeline(
+    request: &BuildRequest,
+    cancelled: &Arc<AtomicBool>,
+    progress: &ProgressSender,
+    tmpdir: &std::path::Path,
+    binary_path: &std::path::Path,
+    project_dir: &std::path::Path,
+) -> Result<PathBuf, String> {
+    // Stage 3: Generate assets (iOS icons)
+    send_stage(progress, StageName::GeneratingAssets, "Generating iOS icons");
+    check_cancelled(cancelled)?;
+    let icons_dir = tmpdir.join("ios_icons");
+    std::fs::create_dir_all(&icons_dir)
+        .map_err(|e| format!("Failed to create icons dir: {e}"))?;
+    if let Some(ref icon_name) = request.manifest.icon {
+        let icon_src = project_dir.join(icon_name);
+        if icon_src.exists() {
+            // Generate icon sizes needed for iOS
+            for (size, name) in &[(1024, "Icon-1024.png"), (180, "Icon-180.png"), (120, "Icon-120.png"), (76, "Icon-76.png")] {
+                if let Ok(img) = image::open(&icon_src) {
+                    let resized = img.resize_exact(*size, *size, image::imageops::FilterType::Lanczos3);
+                    let dest = icons_dir.join(name);
+                    resized.save(&dest).map_err(|e| format!("Failed to save icon {name}: {e}"))?;
+                }
+            }
+        }
+    }
+    send_progress(progress, StageName::GeneratingAssets, 100, None);
+
+    // Stage 4: Create .app bundle
+    send_stage(progress, StageName::Bundling, "Creating iOS .app bundle");
+    check_cancelled(cancelled)?;
+    let app_path = tmpdir.join(format!("{}.app", request.manifest.app_name));
+    std::fs::create_dir_all(&app_path)
+        .map_err(|e| format!("Failed to create .app dir: {e}"))?;
+
+    // Copy binary
+    let dest_binary = app_path.join(&request.manifest.app_name);
+    std::fs::copy(binary_path, &dest_binary)
+        .map_err(|e| format!("Failed to copy binary into .app: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dest_binary, std::fs::Permissions::from_mode(0o755)).ok();
+    }
+
+    // Copy icon
+    let icon_1024 = icons_dir.join("Icon-1024.png");
+    if icon_1024.exists() {
+        std::fs::copy(&icon_1024, app_path.join("AppIcon.png")).ok();
+    }
+
+    // Generate Info.plist
+    let bundle_id = if request.manifest.bundle_id.is_empty() { "com.example.app" } else { &request.manifest.bundle_id };
+    let version = request.manifest.short_version.as_deref()
+        .or(Some(&request.manifest.version))
+        .unwrap_or("1.0.0");
+    let build_number = request.manifest.version.as_str(); // version field is used as build number
+    let info_plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>{}</string>
+    <key>CFBundleIdentifier</key>
+    <string>{}</string>
+    <key>CFBundleName</key>
+    <string>{}</string>
+    <key>CFBundleShortVersionString</key>
+    <string>{}</string>
+    <key>CFBundleVersion</key>
+    <string>{}</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>MinimumOSVersion</key>
+    <string>17.0</string>
+    <key>CFBundleSupportedPlatforms</key>
+    <array><string>iPhoneOS</string></array>
+    <key>UIDeviceFamily</key>
+    <array><integer>1</integer><integer>2</integer></array>
+    <key>UILaunchScreen</key>
+    <dict/>
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+</dict>
+</plist>"#,
+        request.manifest.app_name, bundle_id, request.manifest.app_name, version, build_number
+    );
+    std::fs::write(app_path.join("Info.plist"), &info_plist)
+        .map_err(|e| format!("Failed to write Info.plist: {e}"))?;
+
+    send_progress(progress, StageName::Bundling, 100, None);
+
+    // Stage 5: Create .ipa (zip Payload/App.app)
+    send_stage(progress, StageName::Packaging, "Creating .ipa archive");
+    check_cancelled(cancelled)?;
+    let ipa_path = tmpdir.join(format!("{}.ipa", request.manifest.app_name));
+    {
+        let file = std::fs::File::create(&ipa_path)
+            .map_err(|e| format!("Failed to create .ipa: {e}"))?;
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+
+        // Walk the .app directory and add to Payload/
+        let app_name = format!("{}.app", request.manifest.app_name);
+        for entry in walkdir::WalkDir::new(&app_path) {
+            let entry = entry.map_err(|e| format!("Walk error: {e}"))?;
+            let path = entry.path();
+            let relative = path.strip_prefix(&app_path).unwrap_or(path);
+            let zip_path = format!("Payload/{}/{}", app_name, relative.display());
+
+            if path.is_file() {
+                zip.start_file(&zip_path, options)
+                    .map_err(|e| format!("Zip error: {e}"))?;
+                let data = std::fs::read(path)
+                    .map_err(|e| format!("Read error: {e}"))?;
+                use std::io::Write;
+                zip.write_all(&data)
+                    .map_err(|e| format!("Zip write error: {e}"))?;
+            } else if path.is_dir() && path != app_path.as_path() {
+                zip.add_directory(&zip_path, options)
+                    .map_err(|e| format!("Zip dir error: {e}"))?;
+            }
+        }
+        zip.finish().map_err(|e| format!("Zip finish error: {e}"))?;
+    }
+    send_progress(progress, StageName::Packaging, 100, None);
+
+    // Stage 6: Signing (deferred to Mac worker)
+    send_stage(progress, StageName::Signing, "Skipping signing (deferred to Mac worker)");
+    send_progress(progress, StageName::Signing, 100, None);
+
+    let artifact_path = copy_artifact(&ipa_path, &request.manifest.app_name, &request.job_id, "ipa")?;
+    Ok(artifact_path)
+}
+
+/// macOS cross-compilation pipeline: compile → create .app bundle → tar.gz
+/// Signing + notarization + DMG/pkg + App Store upload deferred to Mac worker.
+async fn run_macos_pipeline(
+    request: &BuildRequest,
+    cancelled: &Arc<AtomicBool>,
+    progress: &ProgressSender,
+    tmpdir: &std::path::Path,
+    binary_path: &std::path::Path,
+    project_dir: &std::path::Path,
+) -> Result<PathBuf, String> {
+    // Stage 3: Generate assets (icon → PNG, no ICNS on Linux)
+    send_stage(progress, StageName::GeneratingAssets, "Generating macOS icon");
+    check_cancelled(cancelled)?;
+    let icon_png_path = tmpdir.join("icon.png");
+    if let Some(ref icon_name) = request.manifest.icon {
+        let icon_src = project_dir.join(icon_name);
+        if icon_src.exists() {
+            // Resize to 1024x1024 PNG (Mac worker will convert to .icns)
+            if let Ok(img) = image::open(&icon_src) {
+                let resized = img.resize_exact(1024, 1024, image::imageops::FilterType::Lanczos3);
+                resized.save(&icon_png_path).ok();
+            }
+        }
+    }
+    send_progress(progress, StageName::GeneratingAssets, 100, None);
+
+    // Stage 4: Create .app bundle
+    send_stage(progress, StageName::Bundling, "Creating macOS .app bundle");
+    check_cancelled(cancelled)?;
+    let app_path = tmpdir.join(format!("{}.app", request.manifest.app_name));
+    let contents = app_path.join("Contents");
+    let macos_dir = contents.join("MacOS");
+    let resources_dir = contents.join("Resources");
+    std::fs::create_dir_all(&macos_dir)
+        .map_err(|e| format!("Failed to create MacOS dir: {e}"))?;
+    std::fs::create_dir_all(&resources_dir)
+        .map_err(|e| format!("Failed to create Resources dir: {e}"))?;
+
+    // Copy binary
+    let dest_binary = macos_dir.join(&request.manifest.app_name);
+    std::fs::copy(binary_path, &dest_binary)
+        .map_err(|e| format!("Failed to copy binary: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dest_binary, std::fs::Permissions::from_mode(0o755)).ok();
+    }
+
+    // Copy icon PNG (Mac worker will convert to .icns if needed)
+    if icon_png_path.exists() {
+        std::fs::copy(&icon_png_path, resources_dir.join("AppIcon.png")).ok();
+    }
+
+    // Generate Info.plist
+    let bundle_id = if request.manifest.bundle_id.is_empty() { "com.example.app" } else { &request.manifest.bundle_id };
+    let version = request.manifest.short_version.as_deref()
+        .or(Some(&request.manifest.version))
+        .unwrap_or("1.0.0");
+    let build_number = request.manifest.version.as_str();
+    let info_plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>{}</string>
+    <key>CFBundleIdentifier</key>
+    <string>{}</string>
+    <key>CFBundleName</key>
+    <string>{}</string>
+    <key>CFBundleShortVersionString</key>
+    <string>{}</string>
+    <key>CFBundleVersion</key>
+    <string>{}</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>"#,
+        request.manifest.app_name, bundle_id, request.manifest.app_name, version, build_number
+    );
+    std::fs::write(contents.join("Info.plist"), &info_plist)
+        .map_err(|e| format!("Failed to write Info.plist: {e}"))?;
+    send_progress(progress, StageName::Bundling, 100, None);
+
+    // Stage 5: Package as tar.gz (Mac worker will create .dmg/.pkg)
+    send_stage(progress, StageName::Packaging, "Creating precompiled bundle for macOS");
+    check_cancelled(cancelled)?;
+    let tarball_path = tmpdir.join(format!("{}-precompiled.tar.gz", request.manifest.app_name));
+    {
+        let file = std::fs::File::create(&tarball_path)
+            .map_err(|e| format!("Failed to create tarball: {e}"))?;
+        let enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut tar = tar::Builder::new(enc);
+        tar.append_dir_all(format!("{}.app", request.manifest.app_name), &app_path)
+            .map_err(|e| format!("Failed to add .app to tarball: {e}"))?;
+        tar.finish().map_err(|e| format!("Failed to finish tarball: {e}"))?;
+    }
+    send_progress(progress, StageName::Packaging, 100, None);
+
+    // Stage 6: Signing (deferred to Mac worker)
+    send_stage(progress, StageName::Signing, "Skipping signing (deferred to Mac worker)");
+    send_progress(progress, StageName::Signing, 100, None);
+
+    let artifact_path = copy_artifact(&tarball_path, &request.manifest.app_name, &request.job_id, "tar.gz")?;
+    Ok(artifact_path)
+}
+
 fn copy_artifact(
     source: &std::path::Path,
     app_name: &str,
@@ -428,6 +690,8 @@ enum BuildTarget {
     Linux,
     Android,
     Windows,
+    Ios,
+    Macos,
 }
 
 fn determine_target(targets: &[String]) -> BuildTarget {
@@ -435,6 +699,8 @@ fn determine_target(targets: &[String]) -> BuildTarget {
         match t.to_lowercase().as_str() {
             "android" => return BuildTarget::Android,
             "windows" => return BuildTarget::Windows,
+            "ios" => return BuildTarget::Ios,
+            "macos" => return BuildTarget::Macos,
             _ => {}
         }
     }
