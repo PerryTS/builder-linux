@@ -233,7 +233,8 @@ async fn compile_in_docker(
 
     run_and_stream(cmd, progress, cancelled).await?;
 
-    if !output_path.exists() {
+    let ios_app_output = output_path.with_extension("app");
+    if !output_path.exists() && !ios_app_output.exists() {
         return Err("Compiler produced no output binary".into());
     }
 
