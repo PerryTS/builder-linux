@@ -463,10 +463,22 @@ async fn run_ios_pipeline(
         std::fs::set_permissions(&dest_binary, std::fs::Permissions::from_mode(0o755)).ok();
     }
 
-    // Copy icon
-    let icon_1024 = icons_dir.join("Icon-1024.png");
-    if icon_1024.exists() {
-        std::fs::copy(&icon_1024, app_path.join("AppIcon.png")).ok();
+    // Copy all icon sizes into .app bundle
+    for name in &["Icon-1024.png", "Icon-180.png", "Icon-120.png", "Icon-76.png"] {
+        let src = icons_dir.join(name);
+        if src.exists() {
+            std::fs::copy(&src, app_path.join(name)).ok();
+        }
+    }
+    // Also generate 152x152 for iPad
+    if let Some(ref icon_name) = request.manifest.icon {
+        let icon_src = project_dir.join(icon_name);
+        if icon_src.exists() {
+            if let Ok(img) = image::open(&icon_src) {
+                let resized = img.resize_exact(152, 152, image::imageops::FilterType::Lanczos3);
+                resized.save(app_path.join("Icon-152.png")).ok();
+            }
+        }
     }
 
     // Generate Info.plist with all Apple-required DT* keys
@@ -506,15 +518,15 @@ async fn run_ios_pipeline(
     <key>DTPlatformName</key>
     <string>iphoneos</string>
     <key>DTPlatformVersion</key>
-    <string>18.0</string>
+    <string>26.2</string>
     <key>DTSDKName</key>
-    <string>iphoneos18.0</string>
+    <string>iphoneos26.2</string>
     <key>DTSDKBuild</key>
-    <string>22A3351</string>
+    <string>17E187</string>
     <key>DTXcode</key>
-    <string>1600</string>
+    <string>2630</string>
     <key>DTXcodeBuild</key>
-    <string>16A242d</string>
+    <string>17E187</string>
     <key>DTCompiler</key>
     <string>com.apple.compilers.llvm.clang.1_0</string>
     <key>UIDeviceFamily</key>
@@ -523,9 +535,45 @@ async fn run_ios_pipeline(
     <dict/>
     <key>UIRequiredDeviceCapabilities</key>
     <array><string>arm64</string></array>
+    <key>CFBundleIconName</key>
+    <string>AppIcon</string>
+    <key>CFBundleIcons</key>
+    <dict>
+        <key>CFBundlePrimaryIcon</key>
+        <dict>
+            <key>CFBundleIconFiles</key>
+            <array>
+                <string>Icon-120</string>
+                <string>Icon-180</string>
+            </array>
+            <key>UIPrerenderedIcon</key>
+            <false/>
+        </dict>
+    </dict>
+    <key>CFBundleIcons~ipad</key>
+    <dict>
+        <key>CFBundlePrimaryIcon</key>
+        <dict>
+            <key>CFBundleIconFiles</key>
+            <array>
+                <string>Icon-76</string>
+                <string>Icon-152</string>
+            </array>
+            <key>UIPrerenderedIcon</key>
+            <false/>
+        </dict>
+    </dict>
     <key>UISupportedInterfaceOrientations</key>
     <array>
         <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationPortraitUpsideDown</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+    <key>UISupportedInterfaceOrientations~ipad</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationPortraitUpsideDown</string>
         <string>UIInterfaceOrientationLandscapeLeft</string>
         <string>UIInterfaceOrientationLandscapeRight</string>
     </array>{encryption_exempt}
