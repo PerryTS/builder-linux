@@ -160,8 +160,8 @@ async fn compile_in_docker(
         .arg("-e").arg("RUSTUP_HOME=/rust/rustup")
         .arg("-e").arg("CARGO_HOME=/tmp/cargo-home")
         .arg("-e").arg("PATH=/usr/local/bin:/rust/cargo/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin")
-        // Rust toolchain's shared libraries (libLLVM.so needed by lld-link/rust-lld)
-        .arg("-e").arg("LD_LIBRARY_PATH=/rust/rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib");
+        // Rust toolchain + system LLVM shared libraries (needed by lld-link, ld64.lld, rust-lld)
+        .arg("-e").arg("LD_LIBRARY_PATH=/rust/rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib:/usr/lib/llvm-18/lib");
 
     // Pass through build environment variables needed for cross-compilation
     // Set cargo linker for Android target so native lib builds use NDK linker, not host ld
@@ -193,20 +193,13 @@ async fn compile_in_docker(
                 let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !path.is_empty() {
                     cmd.arg("-v").arg(format!("{path}:{path}:ro"));
-                    // Mount shared library dependencies (e.g. libLLVM.so for ld64.lld)
-                    if let Ok(ldd) = std::process::Command::new("ldd").arg(&path).output() {
-                        for line in String::from_utf8_lossy(&ldd.stdout).lines() {
-                            if let Some(lib_path) = line.split("=>").nth(1) {
-                                let lib_path = lib_path.trim().split_whitespace().next().unwrap_or("");
-                                if !lib_path.is_empty() && lib_path.starts_with('/') && lib_path.contains("LLVM") {
-                                    cmd.arg("-v").arg(format!("{lib_path}:{lib_path}:ro"));
-                                }
-                            }
-                        }
-                    }
                 }
             }
         }
+    }
+    // Mount system LLVM shared libs (needed by ld64.lld inside Docker)
+    if std::path::Path::new("/usr/lib/llvm-18/lib").exists() {
+        cmd.arg("-v").arg("/usr/lib/llvm-18/lib:/usr/lib/llvm-18/lib:ro");
     }
 
     // Mount Apple SDK sysroot if configured (for iOS/macOS cross-compilation)
