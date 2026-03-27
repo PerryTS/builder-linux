@@ -193,6 +193,17 @@ async fn compile_in_docker(
                 let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !path.is_empty() {
                     cmd.arg("-v").arg(format!("{path}:{path}:ro"));
+                    // Mount shared library dependencies (e.g. libLLVM.so for ld64.lld)
+                    if let Ok(ldd) = std::process::Command::new("ldd").arg(&path).output() {
+                        for line in String::from_utf8_lossy(&ldd.stdout).lines() {
+                            if let Some(lib_path) = line.split("=>").nth(1) {
+                                let lib_path = lib_path.trim().split_whitespace().next().unwrap_or("");
+                                if !lib_path.is_empty() && lib_path.starts_with('/') && lib_path.contains("LLVM") {
+                                    cmd.arg("-v").arg(format!("{lib_path}:{lib_path}:ro"));
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
