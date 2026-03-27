@@ -273,10 +273,31 @@ async fn run_perry_update(perry_binary: &str) -> (bool, String, Option<String>) 
         }
     }
 
-    // Rebuild Windows .lib files on the Kamatera Windows server and copy them here.
-    // These are needed for cross-compiling Perry apps to Windows from Linux.
-    // We can't cross-compile them locally because of ring/cc-rs dependencies.
+    // Rebuild Windows .lib files on the Windows server and copy them here.
+    // perry-stdlib/perry-runtime can't be cross-compiled locally (ring/cc-rs).
     update_windows_libs(src_dir).await;
+
+    // Build perry-ui-windows rlib locally (cross-compile works for this crate).
+    // The rlib is needed by strip_duplicate_objects_from_lib for proper dedup.
+    let cargo = std::env::var("CARGO_HOME")
+        .map(|h| format!("{h}/bin/cargo"))
+        .unwrap_or_else(|_| "cargo".to_string());
+    let ui_rlib = tokio::process::Command::new(&cargo)
+        .args(["build", "--release", "-p", "perry-ui-windows", "--target", "x86_64-pc-windows-msvc"])
+        .current_dir(src_dir)
+        .output()
+        .await;
+    match &ui_rlib {
+        Ok(o) if o.status.success() => {
+            tracing::info!("Built perry-ui-windows rlib for Windows cross-compile dedup");
+        }
+        Ok(o) => {
+            tracing::warn!("perry-ui-windows rlib build failed (non-fatal): {}", String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or(""));
+        }
+        Err(e) => {
+            tracing::warn!("perry-ui-windows rlib build failed (non-fatal): {e}");
+        }
+    }
 
     let new_version = get_perry_version(perry_binary).unwrap_or_default();
     tracing::info!(version = %new_version, "Perry update complete");
