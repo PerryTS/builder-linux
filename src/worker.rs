@@ -517,8 +517,22 @@ async fn connect_and_run(config: &WorkerConfig) -> Result<(), String> {
 
     tracing::info!(max_concurrent = config.max_concurrent_builds, "Connected to hub, waiting for jobs...");
 
-    // Shared WS write channel — build tasks send messages here, main loop writes to WS
+    // Shared WS write channel — build tasks send messages here
     let (ws_tx, mut ws_rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
+
+    // Spawn dedicated WS writer task — drains ws_rx independently of main loop.
+    // This prevents WS write backpressure from blocking job dispatch and
+    // ensures complete/progress messages are always delivered.
+    let ws_writer_error = Arc::new(std::sync::Mutex::new(None::<String>));
+    let ws_writer_err_clone = ws_writer_error.clone();
+    let writer_handle = tokio::spawn(async move {
+        while let Some(msg) = ws_rx.recv().await {
+            if let Err(e) = write.send(msg).await {
+                *ws_writer_err_clone.lock().unwrap() = Some(format!("WS write failed: {e}"));
+                break;
+            }
+        }
+    });
 
     // Per-job cancellation flags
     let cancel_flags: Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>> =
@@ -526,20 +540,13 @@ async fn connect_and_run(config: &WorkerConfig) -> Result<(), String> {
     let active_builds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     loop {
+        // Check if WS writer died
+        if let Some(err) = ws_writer_error.lock().unwrap().take() {
+            return Err(err);
+        }
+
         tokio::select! {
             biased;
-
-            // Drain outbound WS messages from build tasks
-            ws_msg = ws_rx.recv() => {
-                match ws_msg {
-                    Some(msg) => {
-                        if let Err(e) = write.send(msg).await {
-                            return Err(format!("Failed to send WS message: {e}"));
-                        }
-                    }
-                    None => break,
-                }
-            }
 
             // Incoming WebSocket message
             msg = read.next() => {
@@ -554,7 +561,7 @@ async fn connect_and_run(config: &WorkerConfig) -> Result<(), String> {
                 let text = match msg {
                     Message::Text(t) => t,
                     Message::Ping(data) => {
-                        let _ = write.send(Message::Pong(data)).await;
+                        let _ = ws_tx.send(Message::Pong(data));
                         continue;
                     }
                     Message::Close(_) => break,
@@ -633,7 +640,7 @@ async fn connect_and_run(config: &WorkerConfig) -> Result<(), String> {
                                 new_version,
                                 error,
                             };
-                            let _ = write.send(Message::Text(serde_json::to_string(&result).unwrap().into())).await;
+                            let _ = ws_tx.send(Message::Text(serde_json::to_string(&result).unwrap().into()));
                         }
                     }
                 }
