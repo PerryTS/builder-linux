@@ -444,8 +444,11 @@ async fn run_ios_pipeline(
     // Stage 3: Copy icons into the compiler's .app bundle
     send_stage(progress, StageName::GeneratingAssets, "Generating iOS icons");
     check_cancelled(cancelled)?;
+    eprintln!("[ios-pipeline] app_path={} exists={}", app_path.display(), app_path.exists());
+    eprintln!("[ios-pipeline] manifest.icon={:?}", request.manifest.icon);
     if let Some(ref icon_name) = request.manifest.icon {
         let icon_src = project_dir.join(icon_name);
+        eprintln!("[ios-pipeline] icon_src={} exists={}", icon_src.display(), icon_src.exists());
         if icon_src.exists() {
             if let Ok(img) = image::open(&icon_src) {
                 for (size, name) in &[
@@ -453,8 +456,14 @@ async fn run_ios_pipeline(
                     (120, "Icon-120.png"), (152, "Icon-152.png"), (76, "Icon-76.png"),
                 ] {
                     let resized = img.resize_exact(*size, *size, image::imageops::FilterType::Lanczos3);
-                    resized.save(app_path.join(name)).ok();
+                    let dest = app_path.join(name);
+                    match resized.save(&dest) {
+                        Ok(_) => eprintln!("[ios-pipeline] Saved icon {name} ({size}x{size}) to {}", dest.display()),
+                        Err(e) => eprintln!("[ios-pipeline] Failed to save icon {name}: {e}"),
+                    }
                 }
+            } else {
+                eprintln!("[ios-pipeline] Failed to open icon image");
             }
         }
     }
