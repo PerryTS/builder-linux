@@ -1,8 +1,10 @@
 # Perry Builder (Linux)
 
-Rust-based build worker for the Perry ecosystem, targeting Linux and Android.
-Connects to perry-hub via WebSocket, receives build jobs, compiles perry
-projects into native Linux desktop apps or Android APKs, and reports artifacts back.
+Rust-based build worker for the Perry ecosystem. Handles ALL compilation for
+every platform: Linux, Android, Windows, iOS, and macOS. Cross-compiles
+iOS/macOS using ld64.lld + Apple SDK sysroot, and Windows using lld-link + xwin.
+Connects to perry-hub via WebSocket, receives build jobs, and reports artifacts back.
+Precompiled bundles for iOS/macOS/Windows are re-queued by the hub to sign-only workers.
 
 ## Tech Stack
 - **Rust** (tokio async runtime)
@@ -54,9 +56,18 @@ PERRY_BUILD_PERRY_BINARY=~/projects/perry/target/release/perry ./target/release/
 - **tar.gz** — no external tools needed
 
 ## Worker Capabilities
-Advertises `["linux", "android", "windows"]` to the hub. Windows builds are
-cross-compiled using `lld-link` + xwin sysroot, producing a precompiled bundle
-that the hub re-queues to a Windows sign worker.
+Advertises `["linux", "android", "windows", "ios", "macos"]` to the hub.
+- **Linux/Android**: native compilation, full pipeline
+- **Windows**: cross-compiled using `lld-link` + xwin sysroot → precompiled bundle → hub re-queues to Windows sign worker (Azure VM)
+- **iOS**: cross-compiled using `ld64.lld` + Apple SDK sysroot at `/opt/apple-sysroot/ios/` → precompiled bundle → hub re-queues as `ios-sign` to macOS worker
+- **macOS**: cross-compiled using `ld64.lld` + Apple SDK sysroot at `/opt/apple-sysroot/macos/` → precompiled bundle → hub re-queues as `macos-sign` to macOS worker
+
+## Apple Cross-Compilation
+- Uses `ld64.lld` (LLVM's Mach-O linker) + `libLLVM.so.18`, mounted into Docker containers
+- Apple SDK sysroot (~140MB): headers + .tbd stubs at `/opt/apple-sysroot/{ios,macos}/`
+- All Apple libs (perry-runtime, perry-stdlib, perry-ui) cross-compile from Linux using `clang` + `SDKROOT`
+- `CC_aarch64_apple_ios=clang` + `SDKROOT` env vars for ring/cc-rs crates
+- Linker flags: `-dead_strip` directly (not `-Wl,-dead_strip`) for ld64.lld compatibility
 
 ## Concurrent Builds
 Supports running multiple builds in parallel (default 2, via `PERRY_MAX_CONCURRENT_BUILDS`).
@@ -83,15 +94,20 @@ When enabled (`PERRY_DOCKER_ENABLED=true`), builds run in Docker containers:
 - `PERRY_DOCKER_ENABLED` — Enable Docker isolation (default: false)
 - `PERRY_DOCKER_IMAGE` — Docker image name (default: perry-build)
 - `PERRY_WINDOWS_SYSROOT` — Path to xwin Windows SDK sysroot
+- `PERRY_IOS_SYSROOT` — Path to iOS Apple SDK sysroot (default: `/opt/apple-sysroot/ios`)
+- `PERRY_MACOS_SYSROOT` — Path to macOS Apple SDK sysroot (default: `/opt/apple-sysroot/macos`)
 
 ## How It Works
 1. Worker connects to hub WebSocket, sends `worker_hello` with capabilities + `max_concurrent`
 2. Hub assigns jobs → worker receives `job_assign`, spawns build as async task
 3. Each build: download tarball → compile (in Docker if enabled) → package → sign → upload
-4. For Windows: cross-compile → create precompiled bundle → hub re-queues to sign worker
+4. For cross-platform targets:
+   - **Windows**: cross-compile → precompiled bundle → hub re-queues as `windows-sign` to Azure VM
+   - **iOS**: cross-compile → precompiled .app bundle → hub re-queues as `ios-sign` to macOS worker
+   - **macOS**: cross-compile → precompiled .app bundle → hub re-queues as `macos-sign` to macOS worker
 5. Progress/logs streamed via shared WS channel, multiple builds run concurrently
 
 ## Related Repos
 - [hub](https://github.com/PerryTS/hub) — the hub server this worker connects to
-- [builder-macos](https://github.com/PerryTS/builder-macos) — macOS/iOS builder
+- [builder-macos](https://github.com/PerryTS/builder-macos) — macOS/iOS sign-only worker
 - [perry](https://github.com/PerryTS/perry) — compiler + CLI
