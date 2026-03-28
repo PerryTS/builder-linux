@@ -451,9 +451,13 @@ async fn run_ios_pipeline(
         eprintln!("[ios-pipeline] icon_src={} exists={}", icon_src.display(), icon_src.exists());
         if icon_src.exists() {
             if let Ok(img) = image::open(&icon_src) {
+                // Standard iOS icon naming: AppIcon{pt}x{pt}@{scale}x.png
                 for (size, name) in &[
-                    (1024u32, "Icon-1024.png"), (180, "Icon-180.png"),
-                    (120, "Icon-120.png"), (152, "Icon-152.png"), (76, "Icon-76.png"),
+                    (1024u32, "Icon-1024.png"),
+                    (180, "AppIcon60x60@3x.png"),   // iPhone @3x
+                    (120, "AppIcon60x60@2x.png"),   // iPhone @2x
+                    (152, "AppIcon76x76@2x.png"),   // iPad @2x
+                    (76, "AppIcon76x76.png"),        // iPad @1x
                 ] {
                     let resized = img.resize_exact(*size, *size, image::imageops::FilterType::Lanczos3);
                     let dest = app_path.join(name);
