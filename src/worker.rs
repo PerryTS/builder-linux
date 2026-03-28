@@ -400,8 +400,8 @@ async fn update_windows_libs(perry_src_dir: &std::path::Path) {
     // PowerShell commands work over SSH since we set DefaultShell to PowerShell
     let build_script = format!(
         concat!(
-            "$env:PATH = 'C:\\Users\\{}\\.cargo\\bin;C:\\Program Files\\Git\\cmd;' + $env:PATH; ",
-            "cd '{}'; ",
+            "$env:PATH = \"C:\\Users\\{}\\.cargo\\bin;C:\\Program Files\\Git\\cmd;\" + $env:PATH; ",
+            "cd \"{}\"; ",
             "git pull; ",
             "cargo build --release -p perry-runtime -p perry-ui-windows -p perry-stdlib"
         ),
