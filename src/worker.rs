@@ -442,7 +442,9 @@ async fn update_windows_libs(perry_src_dir: &std::path::Path) {
         return;
     }
 
-    for lib in &["perry_runtime.lib", "perry_stdlib.lib", "perry_ui_windows.lib"] {
+    // Only copy runtime and stdlib — perry_ui_windows.lib is cross-compiled locally
+    // (along with its .rlib) to ensure strip-dedup has matching hashes
+    for lib in &["perry_runtime.lib", "perry_stdlib.lib"] {
         let cp = format!(
             "{} '{}:{}/target/release/{}' '{}'",
             scp_base, remote, win_perry_posix, lib,
