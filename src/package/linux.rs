@@ -216,11 +216,14 @@ fn create_tarball(
     ar.append_path_with_name(binary_path, format!("{prefix}/bin/{bin_name}"))
         .map_err(|e| format!("Add binary to tar: {e}"))?;
 
-    // Add icon if present
+    // Add icon if present — both in share/icons (for desktop integration)
+    // and next to the binary (for runtime resolve_asset_path)
     if let Some(icon) = icon_path {
         if icon.exists() {
             ar.append_path_with_name(icon, format!("{prefix}/share/icons/{bin_name}.png"))
-                .map_err(|e| format!("Add icon to tar: {e}"))?;
+                .map_err(|e| format!("Add icon to share: {e}"))?;
+            ar.append_path_with_name(icon, format!("{prefix}/bin/icon.png"))
+                .map_err(|e| format!("Add icon next to binary: {e}"))?;
         }
     }
 
