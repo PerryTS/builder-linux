@@ -151,7 +151,13 @@ pub async fn upload_to_playstore(
     let commit_status = commit_resp.status();
     let commit_body = commit_resp.text().await.unwrap_or_default();
     if !commit_status.is_success() {
-        tracing::error!(status = %commit_status, "Failed to commit Google Play edit: {commit_body}");
+        // Strip HTML tags for cleaner logging
+        let clean_body = if commit_body.contains('<') {
+            commit_body.replace(|c: char| c == '\n' || c == '\r', " ")
+        } else {
+            commit_body.clone()
+        };
+        tracing::error!(status = %commit_status, "Failed to commit Google Play edit: {}", &clean_body[..clean_body.len().min(1000)]);
         return Err(format!("Failed to commit edit ({commit_status}): {commit_body}"));
     }
 
