@@ -300,7 +300,9 @@ async fn run_android_pipeline(
         tmpdir,
     )?;
 
-    let is_playstore = request.manifest.android_distribute.as_deref() == Some("playstore");
+    let is_playstore = request.manifest.android_distribute.as_deref()
+        .map(|d| d == "playstore" || d.starts_with("playstore:"))
+        .unwrap_or(false);
 
     let (gradle_tx, _) = tokio::sync::broadcast::channel(256);
     let artifact_path = if is_playstore {
@@ -368,12 +370,19 @@ async fn run_android_pipeline(
         send_stage(progress, StageName::Publishing, "Uploading to Google Play");
         check_cancelled(cancelled)?;
 
+        // Support "playstore" (defaults to internal track) or "playstore:production", "playstore:beta", etc.
         let play_track = request
             .manifest
             .android_distribute
             .as_deref()
             .and_then(|d| {
-                if d == "playstore" { Some("internal") } else { None }
+                if d.starts_with("playstore:") {
+                    d.strip_prefix("playstore:").filter(|t| !t.is_empty())
+                } else if d == "playstore" {
+                    Some("internal")
+                } else {
+                    None
+                }
             })
             .unwrap_or("internal");
 
