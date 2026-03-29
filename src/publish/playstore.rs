@@ -144,6 +144,7 @@ pub async fn upload_to_playstore(
     let commit_resp = client
         .post(format!("{api_base}/edits/{edit_id}:commit"))
         .header(AUTHORIZATION, format!("Bearer {access_token}"))
+        .header("Content-Length", "0")
         .send()
         .await
         .map_err(|e| format!("Failed to commit edit: {e}"))?;
