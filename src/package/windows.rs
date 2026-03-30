@@ -3,6 +3,21 @@
 
 use crate::queue::job::BuildManifest;
 use serde::{Deserialize, Serialize};
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dst).map_err(|e| format!("mkdir {}: {e}", dst.display()))?;
+    for entry in std::fs::read_dir(src).map_err(|e| format!("readdir {}: {e}", src.display()))? {
+        let entry = entry.map_err(|e| format!("entry: {e}"))?;
+        let dest_path = dst.join(entry.file_name());
+        if entry.file_type().map_or(false, |t| t.is_dir()) {
+            copy_dir_recursive(&entry.path(), &dest_path)?;
+        } else {
+            std::fs::copy(entry.path(), &dest_path)
+                .map_err(|e| format!("copy {}: {e}", entry.path().display()))?;
+        }
+    }
+    Ok(())
+}
 use std::path::{Path, PathBuf};
 
 /// System DLLs that should NOT be bundled (lowercase for comparison).
@@ -149,6 +164,7 @@ pub fn create_precompiled_bundle(
     dll_dir: Option<&Path>,
     perry_version: &str,
     tmpdir: &Path,
+    project_dir: Option<&Path>,
 ) -> Result<PathBuf, String> {
     let bundle_dir = tmpdir.join("perry-precompiled");
     std::fs::create_dir_all(&bundle_dir)
@@ -200,6 +216,19 @@ pub fn create_precompiled_bundle(
                         std::fs::copy(&path, dll_dest.join(&name))
                             .map_err(|e| format!("Failed to copy DLL {}: {e}", name.to_string_lossy()))?;
                     }
+                }
+            }
+        }
+    }
+
+    // Bundle project assets next to the exe
+    if let Some(proj_dir) = project_dir {
+        for dir_name in &["assets", "logo", "resources", "images"] {
+            let src = proj_dir.join(dir_name);
+            if src.is_dir() {
+                let dest = bundle_dir.join(dir_name);
+                if let Err(e) = copy_dir_recursive(&src, &dest) {
+                    eprintln!("[win-bundle] Failed to bundle {dir_name}: {e}");
                 }
             }
         }

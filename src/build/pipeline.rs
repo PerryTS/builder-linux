@@ -221,17 +221,6 @@ async fn run_windows_pipeline(
         tracing::info!("Bundled {} non-system DLLs", copied_dlls.len());
     }
 
-    // Bundle project assets next to the binary
-    let assets_src = project_dir.join("assets");
-    if assets_src.is_dir() {
-        let assets_dest = tmpdir.join("dlls").join("assets");
-        // Put assets in the dll_dir so they get bundled alongside the exe
-        std::fs::create_dir_all(tmpdir.join("dlls")).ok();
-        if let Err(e) = copy_dir_recursive(&assets_src, &assets_dest) {
-            tracing::warn!("Failed to bundle assets: {e}");
-        }
-    }
-
     let perry_version = get_perry_version(&config.perry_binary);
     let ico_opt = if ico_path.exists() { Some(ico_path.as_path()) } else { None };
     let dll_opt = if dll_dir.exists() { Some(dll_dir.as_path()) } else { None };
@@ -242,6 +231,7 @@ async fn run_windows_pipeline(
         dll_opt,
         &perry_version,
         tmpdir,
+        Some(project_dir),
     )?;
     send_progress(progress, StageName::Bundling, 100, None);
 
