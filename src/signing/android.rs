@@ -98,7 +98,8 @@ pub async fn sign_aab(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("jarsigner failed: {stderr}"));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(format!("jarsigner failed (exit {}): stderr={} stdout={}", output.status.code().unwrap_or(-1), stderr, stdout));
     }
 
     Ok(())
