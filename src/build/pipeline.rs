@@ -305,6 +305,7 @@ async fn run_android_pipeline(
         so_path,
         icons_opt,
         tmpdir,
+        Some(project_dir),
     )?;
 
     let is_playstore = request.manifest.android_distribute.as_deref()

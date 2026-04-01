@@ -20,6 +20,7 @@ pub fn create_android_project(
     so_path: &Path,
     icons_dir: Option<&Path>,
     tmpdir: &Path,
+    source_dir: Option<&Path>,
 ) -> Result<PathBuf, String> {
     let project_dir = tmpdir.join("android_project");
 
@@ -114,9 +115,10 @@ pub fn create_android_project(
     let apk_assets = project_dir.join("app/src/main/assets");
     std::fs::create_dir_all(&apk_assets)
         .map_err(|e| format!("Failed to create assets dir: {e}"))?;
-    let project_root = so_path.parent().unwrap_or(std::path::Path::new("."));
+    // Use source_dir (project source) if available, fall back to so_path parent
+    let asset_source = source_dir.unwrap_or_else(|| so_path.parent().unwrap_or(std::path::Path::new(".")));
     for dir_name in &["logo", "assets", "resources", "images"] {
-        let resource_dir = project_root.join(dir_name);
+        let resource_dir = asset_source.join(dir_name);
         if resource_dir.is_dir() {
             let dest = apk_assets.join(dir_name);
             let _ = copy_dir_recursive(&resource_dir, &dest);
