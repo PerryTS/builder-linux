@@ -106,17 +106,17 @@ fn create_appimage(
         "{}-{}-x86_64.AppImage",
         manifest.app_name, manifest.version
     ));
-    let status = std::process::Command::new("appimagetool")
+    let output = std::process::Command::new("appimagetool")
         .arg(&appdir)
         .arg(&output_path)
         .env("ARCH", "x86_64")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .status()
+        .output()
         .map_err(|e| format!("Failed to run appimagetool: {e}. Is it installed?"))?;
 
-    if !status.success() {
-        return Err(format!("appimagetool exited with status {status}"));
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(format!("appimagetool failed (exit {}):\nstdout: {stdout}\nstderr: {stderr}", output.status.code().unwrap_or(-1)));
     }
 
     Ok(output_path)
