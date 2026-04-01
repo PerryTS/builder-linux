@@ -60,6 +60,14 @@ pub struct BuildManifest {
     pub windows_company_name: Option<String>,
     #[serde(default)]
     pub windows_copyright: Option<String>,
+    // macOS-specific fields
+    #[serde(default)]
+    pub macos_distribute: Option<String>,
+    #[serde(default)]
+    pub macos_encryption_exempt: Option<bool>,
+    // Release notes (locale → text) for App Store "What's New"
+    #[serde(default)]
+    pub release_notes: Option<std::collections::HashMap<String, String>>,
 }
 
 #[derive(Debug, Zeroize, ZeroizeOnDrop, serde::Deserialize)]
