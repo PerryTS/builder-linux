@@ -340,12 +340,14 @@ async fn run_perry_update(perry_binary: &str) -> (bool, String, Option<String>) 
         }
     }
 
-    // tvOS libs (uses iOS sysroot — tvOS SDK headers are compatible)
+    // tvOS libs — tier 3 target, requires nightly + -Zbuild-std
+    // perry-runtime and perry-ui-tvos build on Linux; perry-stdlib needs
+    // macOS clang (psm crate assembly), so it's built on the Tart VM.
     let tvos_sysroot = std::env::var("PERRY_TVOS_SYSROOT")
         .unwrap_or_else(|_| ios_sysroot.clone());
-    for pkg in &["perry-runtime", "perry-ui-tvos", "perry-stdlib"] {
+    for pkg in &["perry-runtime", "perry-ui-tvos"] {
         let mut cmd = tokio::process::Command::new(&cargo);
-        cmd.args(["build", "--release", "-p", pkg, "--target", "aarch64-apple-tvos"])
+        cmd.args(["+nightly", "build", "-Zbuild-std", "--release", "-p", pkg, "--target", "aarch64-apple-tvos"])
             .current_dir(src_dir)
             .env("CC_aarch64_apple_tvos", "clang")
             .env("CFLAGS_aarch64_apple_tvos", format!("--target=arm64-apple-tvos17.0 -isysroot {tvos_sysroot}"))
