@@ -340,6 +340,24 @@ async fn run_perry_update(perry_binary: &str) -> (bool, String, Option<String>) 
         }
     }
 
+    // tvOS libs (uses iOS sysroot — tvOS SDK headers are compatible)
+    let tvos_sysroot = std::env::var("PERRY_TVOS_SYSROOT")
+        .unwrap_or_else(|_| ios_sysroot.clone());
+    for pkg in &["perry-runtime", "perry-ui-tvos", "perry-stdlib"] {
+        let mut cmd = tokio::process::Command::new(&cargo);
+        cmd.args(["build", "--release", "-p", pkg, "--target", "aarch64-apple-tvos"])
+            .current_dir(src_dir)
+            .env("CC_aarch64_apple_tvos", "clang")
+            .env("CFLAGS_aarch64_apple_tvos", format!("--target=arm64-apple-tvos17.0 -isysroot {tvos_sysroot}"))
+            .env("SDKROOT", &tvos_sysroot);
+        match cmd.output().await {
+            Ok(o) if o.status.success() => tracing::info!("Built {pkg} for aarch64-apple-tvos"),
+            Ok(o) => tracing::warn!("{pkg} tvOS build failed (non-fatal): {}",
+                String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("")),
+            Err(e) => tracing::warn!("{pkg} tvOS build failed (non-fatal): {e}"),
+        }
+    }
+
     let new_version = get_perry_version(perry_binary).unwrap_or_default();
     tracing::info!(version = %new_version, "Perry update complete");
     (true, new_version, None)
@@ -501,7 +519,7 @@ async fn connect_and_run(config: &WorkerConfig) -> Result<(), String> {
     // Send worker_hello
     let perry_version = get_perry_version(&config.perry_binary);
     let hello = WorkerMessage::WorkerHello {
-        capabilities: vec!["linux".into(), "android".into(), "windows".into(), "ios".into(), "macos".into()],
+        capabilities: vec!["linux".into(), "android".into(), "windows".into(), "ios".into(), "macos".into(), "tvos".into()],
         name: config.worker_name.clone().unwrap_or_else(|| {
             hostname::get()
                 .map(|h| h.to_string_lossy().to_string())

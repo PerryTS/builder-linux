@@ -78,6 +78,7 @@ async fn run_pipeline(
         BuildTarget::Windows => Some("windows"),
         BuildTarget::Ios => Some("ios"),
         BuildTarget::Macos => Some("macos"),
+        BuildTarget::Tvos => Some("tvos"),
         BuildTarget::Linux => None, // native compilation on Linux host
     };
     compiler::compile(
@@ -91,8 +92,8 @@ async fn run_pipeline(
     )
     .await?;
 
-    // For iOS, the compiler may produce a .app directory instead of a flat binary
-    let actual_binary = if target == BuildTarget::Ios {
+    // For iOS/tvOS, the compiler may produce a .app directory instead of a flat binary
+    let actual_binary = if matches!(target, BuildTarget::Ios | BuildTarget::Tvos) {
         let app_output = binary_path.with_extension("app");
         let inner = app_output.join(&request.manifest.app_name);
         if inner.exists() {
@@ -129,6 +130,11 @@ async fn run_pipeline(
         }
         BuildTarget::Macos => {
             run_macos_pipeline(request, cancelled, progress, tmpdir, &actual_binary, &project_dir)
+                .await
+        }
+        BuildTarget::Tvos => {
+            // tvOS uses the same pipeline as iOS (cross-compile → .app → sign-only worker)
+            run_ios_pipeline(request, cancelled, progress, tmpdir, &actual_binary, &project_dir)
                 .await
         }
     }
@@ -682,6 +688,7 @@ enum BuildTarget {
     Windows,
     Ios,
     Macos,
+    Tvos,
 }
 
 fn determine_target(targets: &[String]) -> BuildTarget {
@@ -691,6 +698,7 @@ fn determine_target(targets: &[String]) -> BuildTarget {
             "windows" => return BuildTarget::Windows,
             "ios" => return BuildTarget::Ios,
             "macos" => return BuildTarget::Macos,
+            "tvos" => return BuildTarget::Tvos,
             _ => {}
         }
     }
