@@ -636,9 +636,12 @@ async fn run_macos_pipeline(
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>LSApplicationCategoryType</key>
+    <string>{}</string>
 </dict>
 </plist>"#,
-        request.manifest.app_name, bundle_id, request.manifest.app_name, version, build_number
+        request.manifest.app_name, bundle_id, request.manifest.app_name, version, build_number,
+        request.manifest.category.as_deref().unwrap_or("public.app-category.utilities")
     );
     std::fs::write(contents.join("Info.plist"), &info_plist)
         .map_err(|e| format!("Failed to write Info.plist: {e}"))?;
