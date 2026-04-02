@@ -44,11 +44,12 @@ pub fn package(
     icon_path: Option<&Path>,
     format: LinuxFormat,
     tmpdir: &Path,
+    project_dir: Option<&Path>,
 ) -> Result<PathBuf, String> {
     match format {
-        LinuxFormat::AppImage => create_appimage(manifest, binary_path, icon_path, tmpdir),
-        LinuxFormat::Deb => create_deb(manifest, binary_path, icon_path, tmpdir),
-        LinuxFormat::Tarball => create_tarball(manifest, binary_path, icon_path, tmpdir),
+        LinuxFormat::AppImage => create_appimage(manifest, binary_path, icon_path, tmpdir, project_dir),
+        LinuxFormat::Deb => create_deb(manifest, binary_path, icon_path, tmpdir, project_dir),
+        LinuxFormat::Tarball => create_tarball(manifest, binary_path, icon_path, tmpdir, project_dir),
     }
 }
 
@@ -58,6 +59,7 @@ fn create_appimage(
     binary_path: &Path,
     icon_path: Option<&Path>,
     tmpdir: &Path,
+    project_dir: Option<&Path>,
 ) -> Result<PathBuf, String> {
     let bin_name = binary_name(&manifest.app_name);
     let appdir = tmpdir.join(format!("{}.AppDir", manifest.app_name));
@@ -101,6 +103,17 @@ fn create_appimage(
         .map_err(|e| format!("Write AppRun: {e}"))?;
     set_executable(&apprun_path)?;
 
+    // Bundle project assets next to the binary
+    if let Some(proj) = project_dir {
+        for dir_name in &["assets", "logo", "resources", "images"] {
+            let src = proj.join(dir_name);
+            if src.is_dir() {
+                let dest = usr_bin.join(dir_name);
+                let _ = copy_dir_recursive(&src, &dest);
+            }
+        }
+    }
+
     // Run appimagetool
     let output_path = tmpdir.join(format!(
         "{}-{}-x86_64.AppImage",
@@ -123,11 +136,27 @@ fn create_appimage(
 }
 
 /// Build a .deb package using dpkg-deb.
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dst).map_err(|e| format!("mkdir {}: {e}", dst.display()))?;
+    for entry in std::fs::read_dir(src).map_err(|e| format!("readdir {}: {e}", src.display()))? {
+        let entry = entry.map_err(|e| format!("entry: {e}"))?;
+        let dest_path = dst.join(entry.file_name());
+        if entry.file_type().map_or(false, |t| t.is_dir()) {
+            copy_dir_recursive(&entry.path(), &dest_path)?;
+        } else {
+            std::fs::copy(entry.path(), &dest_path)
+                .map_err(|e| format!("copy {}: {e}", entry.path().display()))?;
+        }
+    }
+    Ok(())
+}
+
 fn create_deb(
     manifest: &BuildManifest,
     binary_path: &Path,
     icon_path: Option<&Path>,
     tmpdir: &Path,
+    _project_dir: Option<&Path>,
 ) -> Result<PathBuf, String> {
     let bin_name = binary_name(&manifest.app_name);
     let deb_root = tmpdir.join(format!("{}_{}_amd64", bin_name, manifest.version));
@@ -202,6 +231,7 @@ fn create_tarball(
     binary_path: &Path,
     icon_path: Option<&Path>,
     tmpdir: &Path,
+    project_dir: Option<&Path>,
 ) -> Result<PathBuf, String> {
     let bin_name = binary_name(&manifest.app_name);
     let prefix = format!("{}-{}-linux-x86_64", bin_name, manifest.version);
@@ -224,6 +254,21 @@ fn create_tarball(
                 .map_err(|e| format!("Add icon to share: {e}"))?;
             ar.append_path_with_name(icon, format!("{prefix}/bin/icon.png"))
                 .map_err(|e| format!("Add icon next to binary: {e}"))?;
+        }
+    }
+
+    // Bundle project assets next to the binary
+    if let Some(proj) = project_dir {
+        for dir_name in &["assets", "logo", "resources", "images"] {
+            let src = proj.join(dir_name);
+            if src.is_dir() {
+                // Copy to a temp dir first, then add to tar
+                let tmp_assets = tmpdir.join(format!("tar-{dir_name}"));
+                let _ = copy_dir_recursive(&src, &tmp_assets);
+                ar.append_dir_all(format!("{prefix}/bin/{dir_name}"), &tmp_assets)
+                    .map_err(|e| format!("Add {dir_name} to tar: {e}"))?;
+                let _ = std::fs::remove_dir_all(&tmp_assets);
+            }
         }
     }
 

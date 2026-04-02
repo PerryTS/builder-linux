@@ -183,7 +183,7 @@ async fn run_linux_pipeline(
     } else {
         None
     };
-    let artifact = linux::package(&request.manifest, binary_path, icon_opt, format, tmpdir)?;
+    let artifact = linux::package(&request.manifest, binary_path, icon_opt, format, tmpdir, Some(project_dir))?;
     send_progress(progress, StageName::Bundling, 100, None);
 
     // Stage 5: Signing (no-op for now)
