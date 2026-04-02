@@ -239,12 +239,17 @@ fn generate_desktop_file(
     icon_name: &str,
     category: &str,
 ) -> String {
+    // freedesktop Icon Theme Spec: Icon value must not have an extension
+    let icon_stem = std::path::Path::new(icon_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(icon_name);
     format!(
         "[Desktop Entry]\n\
          Type=Application\n\
          Name={app_name}\n\
          Exec={bin_name}\n\
-         Icon={icon_name}\n\
+         Icon={icon_stem}\n\
          Categories={category};\n\
          Terminal=false\n"
     )
