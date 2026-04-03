@@ -324,6 +324,36 @@ async fn run_perry_update(perry_binary: &str) -> (bool, String, Option<String>) 
         }
     }
 
+    // iOS game-loop runtime variant (for Bloom Engine / games)
+    {
+        let mut cmd = tokio::process::Command::new(&cargo);
+        cmd.args(["build", "--release", "-p", "perry-runtime", "--features", "ios-game-loop", "--target", "aarch64-apple-ios"])
+            .current_dir(src_dir)
+            .env("CC_aarch64_apple_ios", "clang")
+            .env("CFLAGS_aarch64_apple_ios", format!("--target=arm64-apple-ios17.0 -isysroot {ios_sysroot}"))
+            .env("SDKROOT", &ios_sysroot);
+        match cmd.output().await {
+            Ok(o) if o.status.success() => {
+                // Save as _gameloop variant so the normal runtime isn't overwritten
+                let src = src_dir.join("target/aarch64-apple-ios/release/libperry_runtime.a");
+                let dst = src_dir.join("target/aarch64-apple-ios/release/libperry_runtime_gameloop.a");
+                let _ = std::fs::copy(&src, &dst);
+                tracing::info!("Built perry-runtime (ios-game-loop) for aarch64-apple-ios");
+                // Rebuild normal runtime to restore it
+                let mut restore = tokio::process::Command::new(&cargo);
+                restore.args(["build", "--release", "-p", "perry-runtime", "--target", "aarch64-apple-ios"])
+                    .current_dir(src_dir)
+                    .env("CC_aarch64_apple_ios", "clang")
+                    .env("CFLAGS_aarch64_apple_ios", format!("--target=arm64-apple-ios17.0 -isysroot {ios_sysroot}"))
+                    .env("SDKROOT", &ios_sysroot);
+                let _ = restore.output().await;
+            }
+            Ok(o) => tracing::warn!("perry-runtime ios-game-loop build failed (non-fatal): {}",
+                String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("")),
+            Err(e) => tracing::warn!("perry-runtime ios-game-loop build failed (non-fatal): {e}"),
+        }
+    }
+
     // macOS libs
     for pkg in &["perry-runtime", "perry-ui-macos", "perry-stdlib"] {
         let mut cmd = tokio::process::Command::new(&cargo);

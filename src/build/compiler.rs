@@ -64,6 +64,13 @@ async fn compile_direct(
         cmd.arg("--target").arg(t);
     }
 
+    // Pass project features (e.g. ios-game-loop) to the compiler
+    if let Some(ref features) = manifest.features {
+        if !features.is_empty() {
+            cmd.arg("--features").arg(features.join(","));
+        }
+    }
+
     cmd.current_dir(project_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

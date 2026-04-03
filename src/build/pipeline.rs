@@ -81,6 +81,26 @@ async fn run_pipeline(
         BuildTarget::Tvos => Some("tvos"),
         BuildTarget::Linux => None, // native compilation on Linux host
     };
+    // For ios-game-loop: swap the runtime with the game-loop variant
+    let has_game_loop = request.manifest.features.as_ref()
+        .map(|f| f.iter().any(|s| s == "ios-game-loop"))
+        .unwrap_or(false);
+    let _runtime_backup = if has_game_loop && matches!(target, BuildTarget::Ios) {
+        let perry_dir = std::path::Path::new("/opt/perry-src/target/aarch64-apple-ios/release");
+        let normal = perry_dir.join("libperry_runtime.a");
+        let gameloop = perry_dir.join("libperry_runtime_gameloop.a");
+        let backup = perry_dir.join("libperry_runtime_normal.a");
+        if gameloop.exists() {
+            let _ = std::fs::copy(&normal, &backup);
+            let _ = std::fs::copy(&gameloop, &normal);
+            tracing::info!("Swapped iOS runtime to game-loop variant");
+            Some(backup)
+        } else {
+            tracing::warn!("ios-game-loop requested but libperry_runtime_gameloop.a not found");
+            None
+        }
+    } else { None };
+
     compiler::compile(
         &request.manifest,
         progress,
@@ -110,6 +130,14 @@ async fn run_pipeline(
         binary_path.clone()
     };
     send_progress(progress, StageName::Compiling, 100, None);
+
+    // Restore normal runtime after compilation
+    if let Some(ref backup) = _runtime_backup {
+        let perry_dir = std::path::Path::new("/opt/perry-src/target/aarch64-apple-ios/release");
+        let _ = std::fs::copy(backup, perry_dir.join("libperry_runtime.a"));
+        let _ = std::fs::remove_file(backup);
+        tracing::info!("Restored normal iOS runtime");
+    }
 
     match target {
         BuildTarget::Linux => {

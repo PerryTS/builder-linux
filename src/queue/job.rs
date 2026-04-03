@@ -68,6 +68,9 @@ pub struct BuildManifest {
     // Release notes (locale → text) for App Store "What's New"
     #[serde(default)]
     pub release_notes: Option<std::collections::HashMap<String, String>>,
+    // Project features (e.g. ["ios-game-loop"])
+    #[serde(default)]
+    pub features: Option<Vec<String>>,
 }
 
 #[derive(Debug, Zeroize, ZeroizeOnDrop, serde::Deserialize)]
