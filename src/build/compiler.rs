@@ -238,7 +238,9 @@ async fn compile_in_docker(
     // Pass project features (e.g. ios-game-loop) to the compiler
     if let Some(ref features) = manifest.features {
         if !features.is_empty() {
-            cmd.arg("--features").arg(features.join(","));
+            let features_str = features.join(",");
+            tracing::info!("Passing --features {features_str} to perry compile (docker)");
+            cmd.arg("--features").arg(&features_str);
         }
     }
 
