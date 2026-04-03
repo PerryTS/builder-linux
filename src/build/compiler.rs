@@ -235,6 +235,13 @@ async fn compile_in_docker(
         cmd.arg("--target").arg(t);
     }
 
+    // Pass project features (e.g. ios-game-loop) to the compiler
+    if let Some(ref features) = manifest.features {
+        if !features.is_empty() {
+            cmd.arg("--features").arg(features.join(","));
+        }
+    }
+
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
