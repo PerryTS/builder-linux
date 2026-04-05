@@ -218,6 +218,10 @@ async fn compile_in_docker(
         cmd.arg("-v").arg(format!("{sysroot}:{sysroot}:ro"));
         cmd.arg("-e").arg(format!("PERRY_MACOS_SYSROOT={sysroot}"));
     }
+    if let Ok(sysroot) = std::env::var("PERRY_TVOS_SYSROOT") {
+        cmd.arg("-v").arg(format!("{sysroot}:{sysroot}:ro"));
+        cmd.arg("-e").arg(format!("PERRY_TVOS_SYSROOT={sysroot}"));
+    }
 
     cmd
         // Set working directory to project
