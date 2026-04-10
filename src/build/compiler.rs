@@ -166,8 +166,8 @@ async fn compile_in_docker(
         .arg("-v").arg(format!("{}:/rust/cargo:ro", std::env::var("CARGO_HOME").unwrap_or_else(|_| format!("{}/.cargo", std::env::var("HOME").unwrap_or_else(|_| "/root".into())))))
         .arg("-e").arg("RUSTUP_HOME=/rust/rustup")
         .arg("-e").arg("CARGO_HOME=/tmp/cargo-home")
-        .arg("-e").arg("PATH=/usr/local/bin:/rust/cargo/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin")
-        // Rust toolchain + system LLVM shared libraries (needed by lld-link, ld64.lld, rust-lld)
+        .arg("-e").arg("PATH=/usr/lib/llvm-18/bin:/usr/local/bin:/rust/cargo/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin")
+        // Rust toolchain + system LLVM shared libraries (needed by clang, lld-link, ld64.lld, rust-lld)
         .arg("-e").arg("LD_LIBRARY_PATH=/rust/rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib:/usr/lib/llvm-18/lib");
 
     // Pass through build environment variables needed for cross-compilation
@@ -179,6 +179,10 @@ async fn compile_in_docker(
         "ANDROID_HOME", "ANDROID_SDK_ROOT", "ANDROID_NDK_HOME",
         "PERRY_WINDOWS_SYSROOT",
         "CC_aarch64_linux_android", "AR_aarch64_linux_android",
+        // LLVM backend: clang + bitcode link tool overrides
+        "PERRY_LLVM_CLANG", "PERRY_LLVM_LLVM_AS", "PERRY_LLVM_LLVM_LINK",
+        "PERRY_LLVM_OPT", "PERRY_LLVM_LLC",
+        "PERRY_LLVM_BITCODE_LINK", "PERRY_LLVM_KEEP_IR",
     ] {
         if let Ok(val) = std::env::var(var) {
             cmd.arg("-e").arg(format!("{var}={val}"));
@@ -204,9 +208,12 @@ async fn compile_in_docker(
             }
         }
     }
-    // Mount system LLVM shared libs (needed by ld64.lld inside Docker)
+    // Mount system LLVM shared libs and tools (needed by clang, ld64.lld, llvm-link, etc.)
     if std::path::Path::new("/usr/lib/llvm-18/lib").exists() {
         cmd.arg("-v").arg("/usr/lib/llvm-18/lib:/usr/lib/llvm-18/lib:ro");
+    }
+    if std::path::Path::new("/usr/lib/llvm-18/bin").exists() {
+        cmd.arg("-v").arg("/usr/lib/llvm-18/bin:/usr/lib/llvm-18/bin:ro");
     }
 
     // Mount Apple SDK sysroot if configured (for iOS/macOS cross-compilation)
