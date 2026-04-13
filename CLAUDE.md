@@ -44,6 +44,13 @@ cargo build --release
 PERRY_BUILD_PERRY_BINARY=~/projects/perry/target/release/perry ./target/release/perry-builder-linux
 ```
 
+## LLVM Requirement
+Perry 5.14+ uses the LLVM backend (not Cranelift). LLVM 18 must be installed on the
+host (`apt install llvm-18 clang-18 lld-18`). The builder automatically:
+- Adds `/usr/lib/llvm-18/bin` to PATH for direct builds
+- Sets `PERRY_LLVM_*` env vars pointing to LLVM 18 tools for Docker builds
+- Mounts `/usr/lib/llvm-18/{bin,lib}` into Docker containers
+
 ## Environment Variables
 - `PERRY_HUB_URL` — Hub WebSocket URL (default: `ws://localhost:3457`)
 - `PERRY_BUILD_PERRY_BINARY` — Path to the perry compiler binary

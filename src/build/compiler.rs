@@ -71,6 +71,12 @@ async fn compile_direct(
         }
     }
 
+    // Ensure LLVM tools are on PATH for perry's LLVM backend
+    let path = std::env::var("PATH").unwrap_or_default();
+    if Path::new("/usr/lib/llvm-18/bin").exists() && !path.contains("/usr/lib/llvm-18/bin") {
+        cmd.env("PATH", format!("/usr/lib/llvm-18/bin:{path}"));
+    }
+
     cmd.current_dir(project_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -179,14 +185,23 @@ async fn compile_in_docker(
         "ANDROID_HOME", "ANDROID_SDK_ROOT", "ANDROID_NDK_HOME",
         "PERRY_WINDOWS_SYSROOT",
         "CC_aarch64_linux_android", "AR_aarch64_linux_android",
-        // LLVM backend: clang + bitcode link tool overrides
-        "PERRY_LLVM_CLANG", "PERRY_LLVM_LLVM_AS", "PERRY_LLVM_LLVM_LINK",
-        "PERRY_LLVM_OPT", "PERRY_LLVM_LLC",
         "PERRY_LLVM_BITCODE_LINK", "PERRY_LLVM_KEEP_IR",
     ] {
         if let Ok(val) = std::env::var(var) {
             cmd.arg("-e").arg(format!("{var}={val}"));
         }
+    }
+
+    // LLVM backend tools — set defaults pointing to LLVM 18 in container, allow host env overrides
+    for (var, default) in &[
+        ("PERRY_LLVM_CLANG", "/usr/lib/llvm-18/bin/clang"),
+        ("PERRY_LLVM_LLVM_AS", "/usr/lib/llvm-18/bin/llvm-as"),
+        ("PERRY_LLVM_LLVM_LINK", "/usr/lib/llvm-18/bin/llvm-link"),
+        ("PERRY_LLVM_OPT", "/usr/lib/llvm-18/bin/opt"),
+        ("PERRY_LLVM_LLC", "/usr/lib/llvm-18/bin/llc"),
+    ] {
+        let val = std::env::var(var).unwrap_or_else(|_| default.to_string());
+        cmd.arg("-e").arg(format!("{var}={val}"));
     }
 
     // Mount Android NDK if configured (needed for Android cross-compilation)
