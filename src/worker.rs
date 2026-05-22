@@ -142,7 +142,27 @@ fn get_perry_version(perry_binary: &str) -> Option<String> {
         })
 }
 
-/// Run the perry update process: git pull + cargo build.
+/// Update perry by DOWNLOADING prebuilt release bundles instead of
+/// cross-compiling from source.
+///
+/// Background: this used to `git reset --hard origin/main` + `cargo build`
+/// the host libs, then cross-compile perry-runtime/stdlib/ui for
+/// android/ios/macos/tvos (+ an SSH-to-Azure dance for the Windows .libs).
+/// That accumulated ~50 GB of cargo intermediates in
+/// `target/<triple>/release/` per update cycle and repeatedly filled the
+/// worker disk, and each target's cross toolchain was independently
+/// fragile (AWS_LC jitterentropy, Azure-VM disk, NDK clang++ lookup, …).
+///
+/// perry release CI (PerryTS/perry#1083 / PR #1084) now ships:
+///   - `perry-linux-x86_64.tar.gz`         host: perry + host .a's
+///   - `perry-cross-<triple>.tar.gz`       per-target runtime/stdlib/ui .a's
+///
+/// So an update is now: resolve the latest release tag, download the host
+/// bundle into `target/release/`, download each cross bundle into
+/// `target/<triple>/release/`, and build ONLY the one artifact CI doesn't
+/// ship — the `ios-game-loop` runtime variant (small, single crate) —
+/// locally. Net: ~30 s of curl+tar instead of ~30 min of cross-compiles,
+/// no Azure VM, and `target/` stays tiny.
 async fn run_perry_update(perry_binary: &str) -> (bool, String, Option<String>) {
     // Prevent concurrent updates
     let lock_path = std::env::temp_dir().join("perry-update.lock");
@@ -155,243 +175,174 @@ async fn run_perry_update(perry_binary: &str) -> (bool, String, Option<String>) 
     impl Drop for LockGuard { fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); } }
     let _lock = LockGuard(lock_path);
 
+    // perry_binary = <src_dir>/target/release/perry → src_dir is 3 up.
     let src_dir = std::path::Path::new(perry_binary)
-        .parent()
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent());
-
+        .parent().and_then(|p| p.parent()).and_then(|p| p.parent());
     let src_dir = match src_dir {
-        Some(d) if d.join(".git").exists() => d,
+        Some(d) => d.to_path_buf(),
+        None => return (false, String::new(),
+            Some("Cannot determine perry source directory from binary path".into())),
+    };
+    let target_dir = src_dir.join("target");
+    let host_release = target_dir.join("release");
+
+    let repo = std::env::var("PERRY_RELEASE_REPO")
+        .unwrap_or_else(|_| "PerryTS/perry".to_string());
+
+    // Resolve the release tag to install. Honour an explicit override
+    // (PERRY_RELEASE_TAG) so the hub's expected_version can pin a tag;
+    // otherwise take the most-recently-published release.
+    let tag = match std::env::var("PERRY_RELEASE_TAG") {
+        Ok(t) if !t.is_empty() => t,
         _ => {
-            return (false, String::new(), Some("Cannot determine perry source directory from binary path".into()));
+            let api = format!("https://api.github.com/repos/{repo}/releases?per_page=1");
+            let out = tokio::process::Command::new("curl")
+                .args(["-sSL", "-H", "User-Agent: perry-builder-linux", &api])
+                .output().await;
+            let body = match out {
+                Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+                Ok(o) => return (false, String::new(),
+                    Some(format!("release lookup failed: {}", String::from_utf8_lossy(&o.stderr)))),
+                Err(e) => return (false, String::new(),
+                    Some(format!("release lookup failed: {e}"))),
+            };
+            // Avoid a jq dependency: pull the first "tag_name" out of the JSON.
+            let t = body.split("\"tag_name\"").nth(1)
+                .and_then(|s| s.split('"').nth(1))
+                .map(|s| s.to_string());
+            match t {
+                Some(t) if !t.is_empty() => t,
+                _ => return (false, String::new(),
+                    Some("could not parse latest release tag from GitHub API".into())),
+            }
         }
     };
 
-    tracing::info!(dir = %src_dir.display(), "Updating perry compiler...");
+    tracing::info!(tag = %tag, "Updating perry from release bundles");
 
-    // Clean stale git state from interrupted updates
-    let _ = tokio::process::Command::new("find")
-        .args([".git", "-name", "*.lock", "-delete"])
-        .current_dir(src_dir).output().await;
-    let _ = tokio::process::Command::new("rm")
-        .args(["-rf", ".git/refs/remotes/origin", ".git/packed-refs"])
-        .current_dir(src_dir).output().await;
+    let base = format!("https://github.com/{repo}/releases/download/{tag}");
+    let tmp = std::env::temp_dir().join(format!("perry-dl-{tag}"));
+    let _ = std::fs::remove_dir_all(&tmp);
+    if let Err(e) = std::fs::create_dir_all(&tmp) {
+        return (false, String::new(), Some(format!("mkdir tmp failed: {e}")));
+    }
+    struct TmpGuard(std::path::PathBuf);
+    impl Drop for TmpGuard { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
+    let _tmp_guard = TmpGuard(tmp.clone());
 
-    // Fetch + reset instead of pull to avoid stale ref issues
-    let fetch = tokio::process::Command::new("git")
-        .args(["fetch", "origin"])
-        .current_dir(src_dir)
-        .output()
-        .await;
-
-    match fetch {
-        Ok(ref o) if !o.status.success() => {
-            let stderr = String::from_utf8_lossy(&o.stderr).to_string();
-            return (false, String::new(), Some(format!("git fetch failed: {stderr}")));
+    // Download `url` to `tmp/<name>` then extract it into `dest` (created if
+    // absent). Returns Err(msg) on any failure. tar strips nothing — the
+    // bundles are flat (files at archive root), so `tar -C dest -xzf` lands
+    // them directly in dest.
+    async fn fetch_extract(
+        url: &str, name: &str, tmp: &std::path::Path, dest: &std::path::Path,
+    ) -> Result<(), String> {
+        let archive = tmp.join(name);
+        let dl = tokio::process::Command::new("curl")
+            .args(["-fsSL", "-o", &archive.to_string_lossy(), url])
+            .output().await
+            .map_err(|e| format!("curl {url}: {e}"))?;
+        if !dl.status.success() {
+            return Err(format!("download {url} failed: {}",
+                String::from_utf8_lossy(&dl.stderr)));
         }
-        Err(e) => {
-            return (false, String::new(), Some(format!("git fetch failed: {e}")));
+        std::fs::create_dir_all(dest).map_err(|e| format!("mkdir {}: {e}", dest.display()))?;
+        let ex = tokio::process::Command::new("tar")
+            .args(["-xzf", &archive.to_string_lossy(),
+                   "-C", &dest.to_string_lossy()])
+            .output().await
+            .map_err(|e| format!("tar {name}: {e}"))?;
+        let _ = std::fs::remove_file(&archive);
+        if !ex.status.success() {
+            return Err(format!("extract {name} failed: {}",
+                String::from_utf8_lossy(&ex.stderr)));
         }
-        _ => {}
+        Ok(())
     }
 
-    let reset = tokio::process::Command::new("git")
-        .args(["reset", "--hard", "origin/main"])
-        .current_dir(src_dir)
-        .output()
-        .await;
-
-    match reset {
-        Ok(ref o) if !o.status.success() => {
-            let stderr = String::from_utf8_lossy(&o.stderr).to_string();
-            return (false, String::new(), Some(format!("git reset failed: {stderr}")));
-        }
-        Err(e) => {
-            return (false, String::new(), Some(format!("git reset failed: {e}")));
-        }
-        _ => {}
+    // 1. Host bundle — perry binary + Linux host .a's. FATAL on failure:
+    //    without a fresh perry binary there's no point continuing.
+    let host_url = format!("{base}/perry-linux-x86_64.tar.gz");
+    if let Err(e) = fetch_extract(&host_url, "perry-host.tar.gz", &tmp, &host_release).await {
+        return (false, String::new(), Some(format!("host bundle: {e}")));
     }
+    // Bundle ships `perry` mode 644 from tar; ensure it's executable.
+    let _ = tokio::process::Command::new("chmod")
+        .args(["+x", &host_release.join("perry").to_string_lossy()])
+        .output().await;
+    tracing::info!("Installed host bundle (perry + Linux libs)");
 
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-
-    // Build packages one at a time to keep memory usage low on small VPS instances
-    for pkg in &["perry", "perry-runtime", "perry-stdlib"] {
-        let build = tokio::process::Command::new(&cargo)
-            .args(["build", "--release", "-p", pkg])
-            .current_dir(src_dir)
-            .output()
-            .await;
-
-        match build {
-            Ok(ref o) if !o.status.success() => {
-                let stderr = String::from_utf8_lossy(&o.stderr).to_string();
-                return (false, String::new(), Some(format!("cargo build -p {pkg} failed: {stderr}")));
-            }
-            Err(e) => {
-                return (false, String::new(), Some(format!("cargo build -p {pkg} failed: {e}")));
-            }
-            _ => {}
-        }
-    }
-
-    // Build Android-targeted libraries one at a time (memory-constrained server)
-    // so perry's find_library resolves them from target/aarch64-linux-android/release/
-    for pkg in &["perry-runtime", "perry-ui-android"] {
-        let android_build = tokio::process::Command::new(&cargo)
-            .args(["build", "--release", "-p", pkg, "--target", "aarch64-linux-android"])
-            .current_dir(src_dir)
-            .output()
-            .await;
-
-        match &android_build {
-            Ok(o) if !o.status.success() => {
-                tracing::warn!("Android {pkg} build failed (non-fatal): {}", String::from_utf8_lossy(&o.stderr));
-            }
-            Err(e) => {
-                tracing::warn!("Android {pkg} build failed (non-fatal): {e}");
-            }
-            _ => {}
+    // 2. Cross bundles — one per target triple. Each extracts
+    //    libperry_runtime.a / libperry_stdlib.a / libperry_ui_<t>.a into
+    //    target/<triple>/release/ where find_library resolves them. A
+    //    missing/!published bundle is non-fatal (that platform just keeps
+    //    its prior libs) — mirrors the old per-target non-fatal behaviour.
+    let cross_triples = [
+        "aarch64-apple-ios",
+        "aarch64-apple-darwin",
+        "aarch64-apple-tvos",
+        "aarch64-linux-android",
+        "x86_64-pc-windows-msvc",
+    ];
+    for triple in cross_triples {
+        let url = format!("{base}/perry-cross-{triple}.tar.gz");
+        let dest = target_dir.join(triple).join("release");
+        match fetch_extract(&url, &format!("perry-cross-{triple}.tar.gz"), &tmp, &dest).await {
+            Ok(()) => tracing::info!("Installed cross bundle for {triple}"),
+            Err(e) => tracing::warn!("cross bundle {triple} (non-fatal): {e}"),
         }
     }
 
-    // Build stdlib separately — exclude email feature to avoid openssl cross-compile
-    let android_stdlib = tokio::process::Command::new(&cargo)
-        .args(["build", "--release", "-p", "perry-stdlib", "--no-default-features",
-               "--features", "http-server,http-client,database,crypto,compression,websocket,image,scheduler,ids,html-parser,rate-limit,validation",
-               "--target", "aarch64-linux-android"])
-        .current_dir(src_dir)
-        .output()
-        .await;
-
-    match &android_stdlib {
-        Ok(o) if !o.status.success() => {
-            tracing::warn!("Android stdlib build failed (non-fatal): {}", String::from_utf8_lossy(&o.stderr));
-        }
-        Err(e) => {
-            tracing::warn!("Android stdlib build failed (non-fatal): {e}");
-        }
-        _ => {
-            tracing::info!("Android-targeted libraries built successfully");
-        }
-    }
-
-    // Rebuild Windows .lib files on the Windows server and copy them here.
-    // perry-stdlib/perry-runtime can't be cross-compiled locally (ring/cc-rs).
-    update_windows_libs(src_dir).await;
-
-    // Build perry-ui-windows rlib locally (cross-compile works for this crate).
-    // The rlib is needed by strip_duplicate_objects_from_lib for proper dedup.
-    let cargo = std::env::var("CARGO_HOME")
-        .map(|h| format!("{h}/bin/cargo"))
-        .unwrap_or_else(|_| "cargo".to_string());
-    let ui_rlib = tokio::process::Command::new(&cargo)
-        .args(["build", "--release", "-p", "perry-ui-windows", "--target", "x86_64-pc-windows-msvc"])
-        .current_dir(src_dir)
-        .output()
-        .await;
-    match &ui_rlib {
-        Ok(o) if o.status.success() => {
-            tracing::info!("Built perry-ui-windows rlib for Windows cross-compile dedup");
-        }
-        Ok(o) => {
-            tracing::warn!("perry-ui-windows rlib build failed (non-fatal): {}", String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or(""));
-        }
-        Err(e) => {
-            tracing::warn!("perry-ui-windows rlib build failed (non-fatal): {e}");
-        }
-    }
-
-    // Build Apple-targeted libraries (all cross-compile from Linux)
-    // ring/cc-rs needs CC + SDKROOT env vars to find Apple SDK headers
-    let ios_sysroot = std::env::var("PERRY_IOS_SYSROOT")
-        .unwrap_or_else(|_| "/opt/apple-sysroot/ios".to_string());
-    let macos_sysroot = std::env::var("PERRY_MACOS_SYSROOT")
-        .unwrap_or_else(|_| "/opt/apple-sysroot/macos".to_string());
-
-    // iOS libs
-    for pkg in &["perry-runtime", "perry-ui-ios", "perry-stdlib"] {
-        let mut cmd = tokio::process::Command::new(&cargo);
-        cmd.args(["build", "--release", "-p", pkg, "--target", "aarch64-apple-ios"])
-            .current_dir(src_dir)
+    // 3. ios-game-loop runtime variant. CI does NOT ship this (it's a
+    //    feature-flagged build of just perry-runtime); games like jump
+    //    link `libperry_runtime_gameloop.a`. Build the single crate
+    //    locally against the Apple sysroot — tiny vs. the old full matrix.
+    //    Non-fatal: a failure only affects game (ios-game-loop) builds.
+    if src_dir.join(".git").exists() {
+        let cargo = std::env::var("CARGO_HOME")
+            .map(|h| format!("{h}/bin/cargo"))
+            .unwrap_or_else(|_| "cargo".to_string());
+        let ios_sysroot = std::env::var("PERRY_IOS_SYSROOT")
+            .unwrap_or_else(|_| "/opt/apple-sysroot/ios".to_string());
+        let gl = tokio::process::Command::new(&cargo)
+            .args(["build", "--release", "-p", "perry-runtime",
+                   "--features", "ios-game-loop", "--target", "aarch64-apple-ios"])
+            .current_dir(&src_dir)
             .env("CC_aarch64_apple_ios", "clang")
-            .env("CFLAGS_aarch64_apple_ios", format!("--target=arm64-apple-ios17.0 -isysroot {ios_sysroot}"))
-            .env("SDKROOT", &ios_sysroot);
-        match cmd.output().await {
-            Ok(o) if o.status.success() => tracing::info!("Built {pkg} for aarch64-apple-ios"),
-            Ok(o) => tracing::warn!("{pkg} iOS build failed (non-fatal): {}",
-                String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("")),
-            Err(e) => tracing::warn!("{pkg} iOS build failed (non-fatal): {e}"),
-        }
-    }
-
-    // iOS game-loop runtime variant (for Bloom Engine / games)
-    {
-        let mut cmd = tokio::process::Command::new(&cargo);
-        cmd.args(["build", "--release", "-p", "perry-runtime", "--features", "ios-game-loop", "--target", "aarch64-apple-ios"])
-            .current_dir(src_dir)
-            .env("CC_aarch64_apple_ios", "clang")
-            .env("CFLAGS_aarch64_apple_ios", format!("--target=arm64-apple-ios17.0 -isysroot {ios_sysroot}"))
-            .env("SDKROOT", &ios_sysroot);
-        match cmd.output().await {
+            .env("CXX_aarch64_apple_ios", "clang++")
+            .env("CFLAGS_aarch64_apple_ios",
+                 format!("--target=arm64-apple-ios17.0 -isysroot {ios_sysroot}"))
+            .env("AWS_LC_SYS_NO_JITTER_ENTROPY", "1")
+            .env("SDKROOT", &ios_sysroot)
+            .output().await;
+        match gl {
             Ok(o) if o.status.success() => {
-                // Save as _gameloop variant so the normal runtime isn't overwritten
-                let src = src_dir.join("target/aarch64-apple-ios/release/libperry_runtime.a");
-                let dst = src_dir.join("target/aarch64-apple-ios/release/libperry_runtime_gameloop.a");
-                let _ = std::fs::copy(&src, &dst);
-                tracing::info!("Built perry-runtime (ios-game-loop) for aarch64-apple-ios");
-                // Rebuild normal runtime to restore it
-                let mut restore = tokio::process::Command::new(&cargo);
-                restore.args(["build", "--release", "-p", "perry-runtime", "--target", "aarch64-apple-ios"])
-                    .current_dir(src_dir)
-                    .env("CC_aarch64_apple_ios", "clang")
-                    .env("CFLAGS_aarch64_apple_ios", format!("--target=arm64-apple-ios17.0 -isysroot {ios_sysroot}"))
-                    .env("SDKROOT", &ios_sysroot);
-                let _ = restore.output().await;
+                let rel = target_dir.join("aarch64-apple-ios").join("release");
+                let _ = std::fs::copy(
+                    rel.join("libperry_runtime.a"),
+                    rel.join("libperry_runtime_gameloop.a"));
+                tracing::info!("Built perry-runtime (ios-game-loop) variant");
+                // The above cargo build overwrote the bundle's normal
+                // libperry_runtime.a with a gameloop-featured one. Restore
+                // the canonical one from the cross bundle by re-extracting.
+                let url = format!("{base}/perry-cross-aarch64-apple-ios.tar.gz");
+                let dest = target_dir.join("aarch64-apple-ios").join("release");
+                if let Err(e) = fetch_extract(
+                    &url, "perry-cross-ios-restore.tar.gz", &tmp, &dest).await {
+                    tracing::warn!("restore ios runtime after gameloop (non-fatal): {e}");
+                }
             }
-            Ok(o) => tracing::warn!("perry-runtime ios-game-loop build failed (non-fatal): {}",
+            Ok(o) => tracing::warn!("ios-game-loop build failed (non-fatal): {}",
                 String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("")),
-            Err(e) => tracing::warn!("perry-runtime ios-game-loop build failed (non-fatal): {e}"),
+            Err(e) => tracing::warn!("ios-game-loop build failed (non-fatal): {e}"),
         }
-    }
-
-    // macOS libs
-    for pkg in &["perry-runtime", "perry-ui-macos", "perry-stdlib"] {
-        let mut cmd = tokio::process::Command::new(&cargo);
-        cmd.args(["build", "--release", "-p", pkg, "--target", "aarch64-apple-darwin"])
-            .current_dir(src_dir)
-            .env("CC_aarch64_apple_darwin", "clang")
-            .env("CFLAGS_aarch64_apple_darwin", format!("--target=arm64-apple-macos13.0 -isysroot {macos_sysroot}"))
-            .env("SDKROOT", &macos_sysroot);
-        match cmd.output().await {
-            Ok(o) if o.status.success() => tracing::info!("Built {pkg} for aarch64-apple-darwin"),
-            Ok(o) => tracing::warn!("{pkg} macOS build failed (non-fatal): {}",
-                String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("")),
-            Err(e) => tracing::warn!("{pkg} macOS build failed (non-fatal): {e}"),
-        }
-    }
-
-    // tvOS libs — tier 3 target, requires nightly + -Zbuild-std
-    // perry-runtime and perry-ui-tvos build on Linux; perry-stdlib needs
-    // macOS clang (psm crate assembly), so it's built on the Tart VM.
-    let tvos_sysroot = std::env::var("PERRY_TVOS_SYSROOT")
-        .unwrap_or_else(|_| ios_sysroot.clone());
-    for pkg in &["perry-runtime", "perry-ui-tvos"] {
-        let mut cmd = tokio::process::Command::new(&cargo);
-        cmd.args(["+nightly", "build", "-Zbuild-std", "--release", "-p", pkg, "--target", "aarch64-apple-tvos"])
-            .current_dir(src_dir)
-            .env("CC_aarch64_apple_tvos", "clang")
-            .env("CFLAGS_aarch64_apple_tvos", format!("--target=arm64-apple-tvos17.0 -isysroot {tvos_sysroot}"))
-            .env("SDKROOT", &tvos_sysroot);
-        match cmd.output().await {
-            Ok(o) if o.status.success() => tracing::info!("Built {pkg} for aarch64-apple-tvos"),
-            Ok(o) => tracing::warn!("{pkg} tvOS build failed (non-fatal): {}",
-                String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("")),
-            Err(e) => tracing::warn!("{pkg} tvOS build failed (non-fatal): {e}"),
-        }
+    } else {
+        tracing::warn!("no .git in {} — skipping ios-game-loop local build",
+            src_dir.display());
     }
 
     let new_version = get_perry_version(perry_binary).unwrap_or_default();
-    tracing::info!(version = %new_version, "Perry update complete");
+    tracing::info!(version = %new_version, tag = %tag, "Perry update complete (from release bundles)");
     (true, new_version, None)
 }
 
@@ -399,6 +350,11 @@ async fn run_perry_update(perry_binary: &str) -> (bool, String, Option<String>) 
 /// and copy them to the local cross-compilation target directory.
 /// Uses SSH key auth (PERRY_WINDOWS_BUILD_HOST + PERRY_WINDOWS_BUILD_USER)
 /// or password auth (+ PERRY_WINDOWS_BUILD_PASSWORD) to connect.
+///
+/// No longer called: `run_perry_update` now pulls Windows libs from the
+/// `perry-cross-x86_64-pc-windows-msvc.tar.gz` release bundle, so the
+/// Azure-VM SSH dance is gone. Retained as a documented fallback.
+#[allow(dead_code)]
 async fn update_windows_libs(perry_src_dir: &std::path::Path) {
     let win_host = std::env::var("PERRY_WINDOWS_BUILD_HOST").unwrap_or_default();
     let win_user = std::env::var("PERRY_WINDOWS_BUILD_USER").unwrap_or_default();

@@ -40,6 +40,35 @@ pub async fn compile(
     }
 }
 
+/// If the project has a `package.json`, install its npm dependencies so
+/// perry compile can resolve them. `perry publish` excludes `node_modules`
+/// from the tarball, so the builder is responsible for re-materializing
+/// them. Prefers `npm ci` (deterministic from lockfile); falls back to
+/// `npm install` when no `package-lock.json` is present.
+async fn run_npm_install(
+    project_dir: &Path,
+    progress: &UnboundedSender<ServerMessage>,
+    cancelled: &Arc<AtomicBool>,
+) -> Result<(), String> {
+    if !project_dir.join("package.json").exists() {
+        tracing::info!("no package.json — skipping npm install");
+        return Ok(());
+    }
+    let has_lock = project_dir.join("package-lock.json").exists();
+    let mut cmd = Command::new("npm");
+    if has_lock {
+        tracing::info!("running npm ci in {}", project_dir.display());
+        cmd.args(["ci", "--no-audit", "--no-fund", "--prefer-offline"]);
+    } else {
+        tracing::warn!("no package-lock.json — using npm install in {}", project_dir.display());
+        cmd.args(["install", "--no-audit", "--no-fund", "--prefer-offline"]);
+    }
+    cmd.current_dir(project_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    run_and_stream(cmd, progress, cancelled).await
+}
+
 /// Run perry compile directly on the host (no isolation).
 async fn compile_direct(
     perry_binary: &str,
@@ -53,6 +82,11 @@ async fn compile_direct(
     if target.is_some() {
         setup_target_symlink(perry_binary, project_dir)?;
     }
+
+    // `perry publish` excludes `node_modules` from the tarball, so the
+    // builder must re-populate it before invoking the compiler. No-op for
+    // projects without a package.json (pure-perry sources).
+    run_npm_install(project_dir, progress, cancelled).await?;
 
     let mut cmd = Command::new(perry_binary);
     cmd.arg("compile")
@@ -176,10 +210,37 @@ async fn compile_in_docker(
         // Rust toolchain + system LLVM shared libraries (needed by clang, lld-link, ld64.lld, rust-lld)
         .arg("-e").arg("LD_LIBRARY_PATH=/rust/rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib:/usr/lib/llvm-18/lib");
 
-    // Pass through build environment variables needed for cross-compilation
-    // Set cargo linker for Android target so native lib builds use NDK linker, not host ld
+    // Pass through build environment variables needed for cross-compilation.
+    // Set cargo linker for Android target so native lib builds use NDK linker,
+    // not host ld. Also explicitly set CXX + AR with absolute NDK paths —
+    // some cc-rs versions (e.g. the one oboe-sys 0.6.1 pulls) fail target-
+    // specific env-var lookup and search PATH for `aarch64-linux-android-clang++`
+    // (no API version), which NDK doesn't provide. Absolute paths sidestep
+    // that. We anchor on NDK API 21 (broadly-compatible baseline); CC may
+    // still point at a higher API for perry's own runtime build.
     if let Ok(cc) = std::env::var("CC_aarch64_linux_android") {
         cmd.arg("-e").arg(format!("CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER={cc}"));
+    }
+    if let Ok(ndk) = std::env::var("ANDROID_NDK_HOME") {
+        let ndk_bin = format!("{ndk}/toolchains/llvm/prebuilt/linux-x86_64/bin");
+        let cxx = format!("{ndk_bin}/aarch64-linux-android21-clang++");
+        let cc_abs = format!("{ndk_bin}/aarch64-linux-android21-clang");
+        let ar = format!("{ndk_bin}/llvm-ar");
+        // Set both underscore- and dash-form keys; cc-rs/cargo normalize
+        // differently across versions and oboe-sys's old cc-rs has been seen
+        // to miss the underscore form.
+        for var in &["CXX_aarch64_linux_android", "CXX_aarch64-linux-android"] {
+            cmd.arg("-e").arg(format!("{var}={cxx}"));
+        }
+        for var in &["AR_aarch64_linux_android", "AR_aarch64-linux-android"] {
+            cmd.arg("-e").arg(format!("{var}={ar}"));
+        }
+        // Don't override CC if the host service env already set it — perry's
+        // own android build uses API 24. But if the user's project bumps
+        // hit a "tool not found" again, set CC_aarch64-linux-android absolute too.
+        if std::env::var("CC_aarch64-linux-android").is_err() {
+            cmd.arg("-e").arg(format!("CC_aarch64-linux-android={cc_abs}"));
+        }
     }
     for var in &[
         "ANDROID_HOME", "ANDROID_SDK_ROOT", "ANDROID_NDK_HOME",
@@ -232,43 +293,176 @@ async fn compile_in_docker(
     }
 
     // Mount Apple SDK sysroot if configured (for iOS/macOS cross-compilation)
-    if let Ok(sysroot) = std::env::var("PERRY_IOS_SYSROOT") {
-        cmd.arg("-v").arg(format!("{sysroot}:{sysroot}:ro"));
-        cmd.arg("-e").arg(format!("PERRY_IOS_SYSROOT={sysroot}"));
+    let ios_sysroot = std::env::var("PERRY_IOS_SYSROOT")
+        .unwrap_or_else(|_| "/opt/apple-sysroot/ios".to_string());
+    let macos_sysroot = std::env::var("PERRY_MACOS_SYSROOT")
+        .unwrap_or_else(|_| "/opt/apple-sysroot/macos".to_string());
+    let tvos_sysroot = std::env::var("PERRY_TVOS_SYSROOT")
+        .unwrap_or_else(|_| ios_sysroot.clone());
+    if std::path::Path::new(&ios_sysroot).exists() {
+        cmd.arg("-v").arg(format!("{ios_sysroot}:{ios_sysroot}:ro"));
+        cmd.arg("-e").arg(format!("PERRY_IOS_SYSROOT={ios_sysroot}"));
     }
-    if let Ok(sysroot) = std::env::var("PERRY_MACOS_SYSROOT") {
-        cmd.arg("-v").arg(format!("{sysroot}:{sysroot}:ro"));
-        cmd.arg("-e").arg(format!("PERRY_MACOS_SYSROOT={sysroot}"));
+    if std::path::Path::new(&macos_sysroot).exists() {
+        cmd.arg("-v").arg(format!("{macos_sysroot}:{macos_sysroot}:ro"));
+        cmd.arg("-e").arg(format!("PERRY_MACOS_SYSROOT={macos_sysroot}"));
     }
-    if let Ok(sysroot) = std::env::var("PERRY_TVOS_SYSROOT") {
-        cmd.arg("-v").arg(format!("{sysroot}:{sysroot}:ro"));
-        cmd.arg("-e").arg(format!("PERRY_TVOS_SYSROOT={sysroot}"));
+    if std::path::Path::new(&tvos_sysroot).exists() && tvos_sysroot != ios_sysroot {
+        cmd.arg("-v").arg(format!("{tvos_sysroot}:{tvos_sysroot}:ro"));
+        cmd.arg("-e").arg(format!("PERRY_TVOS_SYSROOT={tvos_sysroot}"));
     }
+
+    // Per-target cross-compile env for cargo/cc-rs when perry compile
+    // builds user-project native lib crates (e.g.
+    // @bloomengine/engine/native/ios/). Without these, cc-rs falls back
+    // to `xcrun` which doesn't exist on Linux. Mirrors the env the
+    // worker's perry-update flow uses for perry's own crates
+    // (worker.rs:305-384). Also disable aws-lc-sys jitterentropy —
+    // its build pulls CoreServices/CoreServices.h which isn't in the
+    // iOS/tvOS SDK sysroot (set globally on the host via systemd
+    // drop-in; not inherited by docker containers).
+    cmd.arg("-e").arg("AWS_LC_SYS_NO_JITTER_ENTROPY=1");
+    // Per-target cross-compile env for cargo/cc-rs. CXX is set so user-project
+    // native crates with C++ deps (Jolt, oboe-sys, etc.) link. BINDGEN_EXTRA_
+    // CLANG_ARGS_<triple> is forwarded so aws-lc-sys's bindgen — which invokes
+    // libclang directly, ignoring CFLAGS — can find Apple framework headers
+    // (CoreServices/CoreServices.h etc.) inside the iOS/tvOS sysroot.
+    // clang/clang++/clang-cl/llvm-lib are all in /usr/lib/llvm-18/bin
+    // (mounted + on PATH).
+    match target {
+        Some("ios") => {
+            let cflags = format!("--target=arm64-apple-ios17.0 -isysroot {ios_sysroot}");
+            let bindgen_args = format!(
+                "--sysroot={ios_sysroot} -isysroot {ios_sysroot} --target=arm64-apple-ios17.0"
+            );
+            cmd.arg("-e").arg("CC_aarch64_apple_ios=clang");
+            cmd.arg("-e").arg("CXX_aarch64_apple_ios=clang++");
+            cmd.arg("-e").arg(format!("CFLAGS_aarch64_apple_ios={cflags}"));
+            cmd.arg("-e").arg(format!("CXXFLAGS_aarch64_apple_ios={cflags}"));
+            cmd.arg("-e").arg(format!("BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_ios={bindgen_args}"));
+            cmd.arg("-e").arg(format!("SDKROOT={ios_sysroot}"));
+        }
+        Some("macos") => {
+            let cflags = format!("--target=arm64-apple-macos13.0 -isysroot {macos_sysroot}");
+            let bindgen_args = format!(
+                "--sysroot={macos_sysroot} -isysroot {macos_sysroot} --target=arm64-apple-macos13.0"
+            );
+            cmd.arg("-e").arg("CC_aarch64_apple_darwin=clang");
+            cmd.arg("-e").arg("CXX_aarch64_apple_darwin=clang++");
+            cmd.arg("-e").arg(format!("CFLAGS_aarch64_apple_darwin={cflags}"));
+            cmd.arg("-e").arg(format!("CXXFLAGS_aarch64_apple_darwin={cflags}"));
+            cmd.arg("-e").arg(format!(
+                "BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_darwin={bindgen_args}"
+            ));
+            cmd.arg("-e").arg(format!("SDKROOT={macos_sysroot}"));
+        }
+        Some("tvos") => {
+            let cflags = format!("--target=arm64-apple-tvos17.0 -isysroot {tvos_sysroot}");
+            let bindgen_args = format!(
+                "--sysroot={tvos_sysroot} -isysroot {tvos_sysroot} --target=arm64-apple-tvos17.0"
+            );
+            cmd.arg("-e").arg("CC_aarch64_apple_tvos=clang");
+            cmd.arg("-e").arg("CXX_aarch64_apple_tvos=clang++");
+            cmd.arg("-e").arg(format!("CFLAGS_aarch64_apple_tvos={cflags}"));
+            cmd.arg("-e").arg(format!("CXXFLAGS_aarch64_apple_tvos={cflags}"));
+            cmd.arg("-e").arg(format!("BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_tvos={bindgen_args}"));
+            cmd.arg("-e").arg(format!("SDKROOT={tvos_sysroot}"));
+        }
+        Some("windows") => {
+            // Windows MSVC cross-compile from Linux. cc-rs's default Windows
+            // path invokes `lib.exe` (the MSVC archiver) by name, which doesn't
+            // exist on Linux — minimp3-sys hits this. LLVM's `llvm-lib` is an
+            // MSVC-compatible archiver and `clang-cl` is the MSVC-compatible
+            // clang driver. Both ship in LLVM 18 (mounted + on PATH).
+            //
+            // xwin-fetched sysroot layout used here:
+            //   $sysroot/crt/include              MSVC CRT headers
+            //   $sysroot/sdk/include/{ucrt,um,shared}   Windows SDK headers
+            let win_sysroot = std::env::var("PERRY_WINDOWS_SYSROOT")
+                .unwrap_or_else(|_| "/opt/win-sysroot".to_string());
+            let cflags = format!(
+                "--target=x86_64-pc-windows-msvc /imsvc {ws}/crt/include /imsvc {ws}/sdk/include/ucrt /imsvc {ws}/sdk/include/um /imsvc {ws}/sdk/include/shared",
+                ws = win_sysroot
+            );
+            for ar_var in &["AR_x86_64_pc_windows_msvc", "AR_x86_64-pc-windows-msvc"] {
+                cmd.arg("-e").arg(format!("{ar_var}=llvm-lib"));
+            }
+            for cc_var in &["CC_x86_64_pc_windows_msvc", "CC_x86_64-pc-windows-msvc"] {
+                cmd.arg("-e").arg(format!("{cc_var}=clang-cl"));
+            }
+            for cxx_var in &["CXX_x86_64_pc_windows_msvc", "CXX_x86_64-pc-windows-msvc"] {
+                cmd.arg("-e").arg(format!("{cxx_var}=clang-cl"));
+            }
+            cmd.arg("-e").arg(format!("CFLAGS_x86_64_pc_windows_msvc={cflags}"));
+            cmd.arg("-e").arg(format!("CXXFLAGS_x86_64_pc_windows_msvc={cflags}"));
+        }
+        _ => {}
+    }
+
+    // npm cache: previously a shared host mount (~/.npm → /root/.npm), but
+    // concurrent builds racing on the same cache produced "npm error
+    // Invalid Version:" failures on this worker. Drop the shared mount —
+    // each container now uses an ephemeral cache inside its writable layer.
+    // Trade-off: re-downloads npm packages per build (~10-30s extra on the
+    // first npm-using job per platform), but no races. If repeat-build
+    // performance becomes important again, switch to a per-job subdir
+    // (e.g. /tmp/npm-cache-<uuid>) instead of going back to the shared mount.
+
+    // Build the perry compile command as a single shell line. Container
+    // paths are all builder-controlled absolute paths so POSIX single-quoting
+    // is sufficient. `perry publish` excludes node_modules from the tarball
+    // (publish.rs:2643), so we materialize them here via `npm ci` (lockfile
+    // present) or `npm install` (no lockfile) inside the same container
+    // before running perry compile. No-op for projects without a package.json.
+    fn shq(s: &str) -> String {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
+
+    let mut perry_compile_cmd = format!(
+        "exec {} compile {} -o {}",
+        shq(&container_perry),
+        shq(&container_entry),
+        shq(&container_output),
+    );
+    if let Some(t) = target {
+        perry_compile_cmd.push_str(&format!(" --target {}", shq(t)));
+    }
+    if let Some(ref features) = manifest.features {
+        if !features.is_empty() {
+            let features_str = features.join(",");
+            tracing::info!("Passing --features {features_str} to perry compile (docker)");
+            perry_compile_cmd.push_str(&format!(" --features {}", shq(&features_str)));
+        }
+    }
+
+    let build_script = format!(
+        "set -e\n\
+         cd {project}\n\
+         if [ -f package.json ]; then\n\
+             if [ -f package-lock.json ]; then\n\
+                 echo '[builder] npm ci'\n\
+                 npm ci --no-audit --no-fund --prefer-offline\n\
+             else\n\
+                 echo '[builder] WARN: no package-lock.json — using npm install' >&2\n\
+                 npm install --no-audit --no-fund --prefer-offline\n\
+             fi\n\
+         else\n\
+             echo '[builder] no package.json — skipping npm step'\n\
+         fi\n\
+         {perry_compile}",
+        project = shq(container_project),
+        perry_compile = perry_compile_cmd,
+    );
 
     cmd
         // Set working directory to project
         .arg("-w").arg(container_project)
         // Use the build image
         .arg(&config.docker_image)
-        // Run perry compile
-        .arg(container_perry)
-        .arg("compile")
-        .arg(&container_entry)
-        .arg("-o")
-        .arg(&container_output);
-
-    if let Some(t) = target {
-        cmd.arg("--target").arg(t);
-    }
-
-    // Pass project features (e.g. ios-game-loop) to the compiler
-    if let Some(ref features) = manifest.features {
-        if !features.is_empty() {
-            let features_str = features.join(",");
-            tracing::info!("Passing --features {features_str} to perry compile (docker)");
-            cmd.arg("--features").arg(&features_str);
-        }
-    }
+        // sh -c wrapper that runs npm (if needed) then perry compile
+        .arg("sh")
+        .arg("-c")
+        .arg(&build_script);
 
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped());
