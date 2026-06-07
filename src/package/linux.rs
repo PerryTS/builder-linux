@@ -17,6 +17,10 @@ pub enum LinuxFormat {
     AppImage,
     Deb,
     Tarball,
+    /// The bare standalone executable — no desktop wrapper. perry compiles to a
+    /// self-contained native binary, so server/CLI apps just want the executable
+    /// to run directly on a Linux server (no Node.js, no AppImage/FUSE).
+    Binary,
 }
 
 impl LinuxFormat {
@@ -24,6 +28,7 @@ impl LinuxFormat {
         match s {
             Some("deb") => Self::Deb,
             Some("tarball") | Some("tar.gz") => Self::Tarball,
+            Some("binary") | Some("executable") | Some("bin") => Self::Binary,
             _ => Self::AppImage,
         }
     }
@@ -33,6 +38,8 @@ impl LinuxFormat {
             Self::AppImage => "AppImage",
             Self::Deb => "deb",
             Self::Tarball => "tar.gz",
+            // No extension — the artifact is the executable itself.
+            Self::Binary => "",
         }
     }
 }
@@ -50,7 +57,30 @@ pub fn package(
         LinuxFormat::AppImage => create_appimage(manifest, binary_path, icon_path, tmpdir, project_dir),
         LinuxFormat::Deb => create_deb(manifest, binary_path, icon_path, tmpdir, project_dir),
         LinuxFormat::Tarball => create_tarball(manifest, binary_path, icon_path, tmpdir, project_dir),
+        LinuxFormat::Binary => create_binary(manifest, binary_path, tmpdir),
     }
+}
+
+/// "Package" the bare standalone executable: copy the compiled perry binary to
+/// `<app_name>` (sanitized) with the executable bit set, and return it as the
+/// final artifact. Used by server/CLI apps that run the binary directly on a
+/// Linux host instead of shipping a desktop AppImage.
+fn create_binary(
+    manifest: &BuildManifest,
+    binary_path: &Path,
+    tmpdir: &Path,
+) -> Result<PathBuf, String> {
+    let bin_name = binary_name(&manifest.app_name);
+    let output_path = tmpdir.join(&bin_name);
+    std::fs::copy(binary_path, &output_path)
+        .map_err(|e| format!("Failed to copy executable: {e}"))?;
+    let mut perms = std::fs::metadata(&output_path)
+        .map_err(|e| format!("Failed to stat executable: {e}"))?
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&output_path, perms)
+        .map_err(|e| format!("Failed to chmod executable: {e}"))?;
+    Ok(output_path)
 }
 
 /// Build an AppImage by constructing an AppDir and calling `appimagetool`.
@@ -359,6 +389,15 @@ mod tests {
             LinuxFormat::from_str_or_default(Some("unknown")),
             LinuxFormat::AppImage
         );
+        assert_eq!(
+            LinuxFormat::from_str_or_default(Some("binary")),
+            LinuxFormat::Binary
+        );
+        assert_eq!(
+            LinuxFormat::from_str_or_default(Some("executable")),
+            LinuxFormat::Binary
+        );
+        assert_eq!(LinuxFormat::Binary.extension(), "");
     }
 
     #[test]
