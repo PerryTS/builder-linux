@@ -396,6 +396,27 @@ async fn compile_in_docker(
             cmd.arg("-e").arg(format!("CFLAGS_x86_64_pc_windows_msvc={cflags}"));
             cmd.arg("-e").arg(format!("CXXFLAGS_x86_64_pc_windows_msvc={cflags}"));
         }
+        Some("linux-arm64") | Some("linux-aarch64") => {
+            // aarch64 Linux cross-compile from an x86_64 host. Point cc-rs at
+            // the GNU cross toolchain so user-project native C/C++ deps build
+            // for aarch64 instead of the host. perry's own final link also uses
+            // aarch64-linux-gnu-gcc (see perry link/platform_cmd.rs), so the
+            // build container must provide the `gcc-aarch64-linux-gnu` package.
+            for cc_var in &["CC_aarch64_unknown_linux_gnu", "CC_aarch64-unknown-linux-gnu"] {
+                cmd.arg("-e").arg(format!("{cc_var}=aarch64-linux-gnu-gcc"));
+            }
+            for cxx_var in &["CXX_aarch64_unknown_linux_gnu", "CXX_aarch64-unknown-linux-gnu"] {
+                cmd.arg("-e").arg(format!("{cxx_var}=aarch64-linux-gnu-g++"));
+            }
+            for ar_var in &["AR_aarch64_unknown_linux_gnu", "AR_aarch64-unknown-linux-gnu"] {
+                cmd.arg("-e").arg(format!("{ar_var}=aarch64-linux-gnu-ar"));
+            }
+            // cargo's own linker var for the aarch64 leg (build-deps / proc-macro
+            // stay on host; only the target leg is redirected).
+            cmd.arg("-e").arg(
+                "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc",
+            );
+        }
         _ => {}
     }
 
