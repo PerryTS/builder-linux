@@ -79,6 +79,9 @@ async fn run_pipeline(
         BuildTarget::Ios => Some("ios"),
         BuildTarget::Macos => Some("macos"),
         BuildTarget::Tvos => Some("tvos"),
+        // aarch64 Linux is a cross-compile even on a Linux host, so it must
+        // pass an explicit --target (unlike native x86_64 Linux below).
+        BuildTarget::LinuxArm64 => Some("linux-arm64"),
         BuildTarget::Linux => None, // native compilation on Linux host
     };
     // For ios-game-loop: swap the runtime with the game-loop variant
@@ -140,7 +143,7 @@ async fn run_pipeline(
     }
 
     match target {
-        BuildTarget::Linux => {
+        BuildTarget::Linux | BuildTarget::LinuxArm64 => {
             run_linux_pipeline(request, cancelled, progress, tmpdir, &actual_binary, &project_dir)
                 .await
         }
@@ -722,6 +725,7 @@ fn copy_artifact(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BuildTarget {
     Linux,
+    LinuxArm64,
     Android,
     Windows,
     Ios,
@@ -737,6 +741,9 @@ fn determine_target(targets: &[String]) -> BuildTarget {
             "ios" => return BuildTarget::Ios,
             "macos" => return BuildTarget::Macos,
             "tvos" => return BuildTarget::Tvos,
+            // aarch64 Linux: cross-compiled (the builder host is x86_64) and
+            // packaged the same as x86_64 Linux — the binary is just aarch64.
+            "linux-arm64" | "linux-aarch64" => return BuildTarget::LinuxArm64,
             _ => {}
         }
     }
