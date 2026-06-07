@@ -862,6 +862,7 @@ async fn handle_build(
                     "windows" => Some("windows"),
                     "ios" => Some("ios"),
                     "macos" => Some("macos"),
+                    "tvos" => Some("ios"),
                     _ => None,
                 },
                 "artifacts": [{"name": artifact_name, "size": size, "sha256": sha256}]
