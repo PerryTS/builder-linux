@@ -21,33 +21,69 @@ async fn upload_artifact(
     use base64::Engine;
     let data =
         std::fs::read(artifact_path).map_err(|e| format!("Failed to read artifact: {e}"))?;
+    let expected_size = data.len() as u64;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
 
     let client = reqwest::Client::new();
-    let mut req = client
-        .post(url)
-        .header("Content-Type", "text/plain")
-        .header("x-artifact-name", artifact_name)
-        .header("x-artifact-sha256", sha256)
-        .header("x-artifact-target", target);
-    if let Some(token) = auth_token {
-        req = req.header("Authorization", format!("Bearer {token}"));
-    }
-    let resp = req
-        .body(b64)
-        .send()
-        .await
-        .map_err(|e| format!("Artifact upload failed: {e}"))?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("Hub returned HTTP {status} for artifact upload: {body}"));
+    // The hub (perry-compiled) intermittently corrupts the large base64 upload
+    // body under GC pressure, so the stored artifact later fails to download /
+    // base64-decode on the sign worker. Detect via the decoded size the hub
+    // reports back (a corrupted body decodes to a wrong/truncated buffer) and
+    // re-upload a fresh copy until the stored size matches the artifact.
+    const MAX_ATTEMPTS: u32 = 5;
+    let mut last_err = String::from("no attempt made");
+    for attempt in 1..=MAX_ATTEMPTS {
+        let mut req = client
+            .post(url)
+            .header("Content-Type", "text/plain")
+            .header("x-artifact-name", artifact_name)
+            .header("x-artifact-sha256", sha256)
+            .header("x-artifact-target", target);
+        if let Some(token) = auth_token {
+            req = req.header("Authorization", format!("Bearer {token}"));
+        }
+        let resp = match req.body(b64.clone()).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                last_err = format!("Artifact upload failed: {e}");
+                tracing::warn!(attempt, "{last_err}; retrying");
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                continue;
+            }
+        };
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            last_err = format!("Hub returned HTTP {status} for artifact upload: {body}");
+            tracing::warn!(attempt, "{last_err}; retrying");
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            continue;
+        }
+        let json = match resp.json::<serde_json::Value>().await {
+            Ok(j) => j,
+            Err(e) => {
+                last_err = format!("Failed to parse upload response: {e}");
+                tracing::warn!(attempt, "{last_err}; retrying");
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                continue;
+            }
+        };
+        let hub_size = json.get("size").and_then(|s| s.as_u64()).unwrap_or(0);
+        if hub_size != expected_size {
+            last_err = format!(
+                "hub stored decoded size {hub_size} != artifact size {expected_size} (corrupted upload)"
+            );
+            tracing::warn!(attempt, "{last_err}; re-uploading");
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            continue;
+        }
+        if attempt > 1 {
+            tracing::info!(attempt, "artifact upload succeeded after retry");
+        }
+        return Ok(json);
     }
-
-    resp.json::<serde_json::Value>()
-        .await
-        .map_err(|e| format!("Failed to parse upload response: {e}"))
+    Err(format!("Artifact upload failed after {MAX_ATTEMPTS} attempts: {last_err}"))
 }
 
 /// Download a base64-encoded tarball from the hub and write the decoded bytes to a temp file.
@@ -780,6 +816,13 @@ async fn handle_build(
             let target = match build_target.as_str() {
                 "windows" => "windows-precompiled",
                 "ios" => "ios-precompiled",
+                // tvOS signs/packages exactly like iOS (Apple .app -> signed
+                // .ipa -> App Store Connect), so route the precompiled tvOS
+                // bundle through the existing ios-sign worker path. Without this
+                // tvOS fell through to the bare "tvos" tag, which the hub never
+                // re-queued for signing — the unsigned .app was returned as a
+                // "final" artifact and never reached TestFlight.
+                "tvos" => "ios-precompiled",
                 "macos" => "macos-precompiled",
                 other => other,
             };
