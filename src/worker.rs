@@ -823,6 +823,7 @@ async fn handle_build(
                 // re-queued for signing — the unsigned .app was returned as a
                 // "final" artifact and never reached TestFlight.
                 "tvos" => "ios-precompiled",
+                "watchos" => "ios-precompiled",
                 "macos" => "macos-precompiled",
                 other => other,
             };
@@ -862,7 +863,8 @@ async fn handle_build(
                     "windows" => Some("windows"),
                     "ios" => Some("ios"),
                     "macos" => Some("macos"),
-                    "tvos" => Some("ios"),
+                    "tvos" => Some("tvos"),
+                    "watchos" => Some("watchos"),
                     _ => None,
                 },
                 "artifacts": [{"name": artifact_name, "size": size, "sha256": sha256}]
