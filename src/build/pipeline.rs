@@ -708,7 +708,13 @@ fn copy_artifact(
     std::fs::create_dir_all(&artifact_dir)
         .map_err(|e| format!("Failed to create artifact dir: {e}"))?;
 
-    let dest = artifact_dir.join(format!("{app_name}-{job_id}.{ext}"));
+    // An empty extension (e.g. the bare-executable Linux format) must not leave
+    // a trailing dot on the artifact filename.
+    let dest = if ext.is_empty() {
+        artifact_dir.join(format!("{app_name}-{job_id}"))
+    } else {
+        artifact_dir.join(format!("{app_name}-{job_id}.{ext}"))
+    };
     std::fs::copy(source, &dest).map_err(|e| format!("Failed to copy artifact: {e}"))?;
     Ok(dest)
 }
