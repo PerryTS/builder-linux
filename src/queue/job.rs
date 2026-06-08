@@ -40,6 +40,10 @@ pub struct BuildManifest {
     pub android_permissions: Option<Vec<String>>,
     #[serde(default)]
     pub android_distribute: Option<String>,
+    /// Explicit Play `versionCode` from `perry.toml [android]`; overrides the
+    /// value derived from `version` (`build_number` → `version_to_code`).
+    #[serde(default)]
+    pub android_version_code: Option<u32>,
     // Linux-specific fields
     #[serde(default)]
     pub linux_format: Option<String>,
