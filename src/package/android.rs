@@ -149,7 +149,7 @@ pub fn create_android_project(
             .map_err(|e| format!("Failed to read build.gradle.kts: {e}"))?;
         let min_sdk = manifest.android_min_sdk.as_deref().unwrap_or("24");
         let target_sdk = manifest.android_target_sdk.as_deref().unwrap_or("34");
-        let version_code = version_to_code(&manifest.version);
+        let version_code = resolved_version_code(manifest);
         let content = content
             .replace("com.perry.template", &manifest.bundle_id)
             .replace("minSdk = 24", &format!("minSdk = {min_sdk}"))
@@ -360,7 +360,7 @@ fn copy_harness_tree(src: &Path, dst: &Path) -> Result<(), String> {
 /// harness's `app/build.gradle[.kts]` to match the build manifest, so Play Store
 /// uploads carry a unique, increasing versionCode.
 fn stamp_gradle_version(project_dir: &Path, manifest: &BuildManifest) {
-    let version_code = version_to_code(&manifest.version);
+    let version_code = resolved_version_code(manifest);
     for rel in ["app/build.gradle.kts", "app/build.gradle"] {
         let path = project_dir.join(rel);
         let Ok(content) = std::fs::read_to_string(&path) else {
@@ -616,6 +616,17 @@ async fn run_gradle(
     Ok(())
 }
 
+/// Resolve the Android `versionCode`: an explicit `[android] version_code` from
+/// perry.toml (carried in `manifest.android_version_code`) wins; otherwise it is
+/// derived from the manifest version (`build_number`) via [`version_to_code`].
+/// The explicit override lets a project keep `versionCode` monotonic across
+/// CI/build-number changes without changing the marketing version.
+fn resolved_version_code(manifest: &BuildManifest) -> u32 {
+    manifest
+        .android_version_code
+        .unwrap_or_else(|| version_to_code(&manifest.version))
+}
+
 /// Convert a semver version string to an Android versionCode integer.
 fn version_to_code(version: &str) -> u32 {
     let parts: Vec<u32> = version
@@ -726,6 +737,46 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    fn sample_manifest() -> BuildManifest {
+        BuildManifest {
+            app_name: "TestApp".into(),
+            bundle_id: "com.example.testapp".into(),
+            version: "1.0.0".into(),
+            short_version: None,
+            entry: "src/main.ts".into(),
+            icon: None,
+            targets: vec!["android".into()],
+            category: None,
+            minimum_os_version: None,
+            entitlements: None,
+            ios_deployment_target: None,
+            ios_device_family: None,
+            ios_orientations: None,
+            ios_capabilities: None,
+            ios_distribute: None,
+            android_min_sdk: None,
+            android_target_sdk: None,
+            android_permissions: None,
+            android_distribute: None,
+            android_version_code: None,
+            linux_format: None,
+            linux_category: None,
+            linux_description: None,
+            windows_distribute: None,
+            windows_uac_level: None,
+            windows_dpi_aware: None,
+            windows_file_description: None,
+            windows_company_name: None,
+            windows_copyright: None,
+            ios_encryption_exempt: None,
+            ios_info_plist: None,
+            macos_distribute: None,
+            macos_encryption_exempt: None,
+            release_notes: None,
+            features: None,
+        }
+    }
+
     #[test]
     fn test_android_manifest_xml_no_permissions() {
         let manifest = BuildManifest {
@@ -748,6 +799,7 @@ mod tests {
             android_target_sdk: None,
             android_permissions: None,
             android_distribute: None,
+            android_version_code: None,
             linux_format: None,
             linux_category: None,
             linux_description: None,
@@ -800,6 +852,7 @@ mod tests {
                 "ACCESS_FINE_LOCATION".into(),
             ]),
             android_distribute: None,
+            android_version_code: None,
             linux_format: None,
             linux_category: None,
             linux_description: None,
@@ -849,6 +902,7 @@ mod tests {
                 "com.google.android.providers.gsf.permission.READ_GSERVICES".into(),
             ]),
             android_distribute: None,
+            android_version_code: None,
             linux_format: None,
             linux_category: None,
             linux_description: None,
@@ -869,6 +923,15 @@ mod tests {
         let xml = generate_android_manifest_xml(&manifest);
         // Fully qualified permissions should be passed through as-is
         assert!(xml.contains("com.google.android.providers.gsf.permission.READ_GSERVICES"));
+    }
+
+    #[test]
+    fn test_resolved_version_code_prefers_override() {
+        let mut m = sample_manifest();
+        m.version = "80".into(); // build_number -> derived 800000
+        assert_eq!(resolved_version_code(&m), 800000);
+        m.android_version_code = Some(800078);
+        assert_eq!(resolved_version_code(&m), 800078);
     }
 
     #[test]
