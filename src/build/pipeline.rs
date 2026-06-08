@@ -307,11 +307,12 @@ async fn run_android_pipeline(
     send_progress(progress, StageName::GeneratingAssets, 100, None);
 
     // Stage 4: Bundle — Create Android Gradle project and build APK
-    send_stage(
-        progress,
-        StageName::Bundling,
-        "Creating Android project and building APK",
-    );
+    let bundle_msg = if android::detect_project_android_harness(Some(project_dir)).is_some() {
+        "Building project android/ harness (custom Activity)"
+    } else {
+        "Creating Android project and building APK"
+    };
+    send_stage(progress, StageName::Bundling, bundle_msg);
     check_cancelled(cancelled)?;
 
     let keystore_path = if let Some(ref b64) = request.credentials.android_keystore_base64 {
