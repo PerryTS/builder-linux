@@ -405,7 +405,8 @@ mod tests {
         let content = generate_desktop_file("My App", "my-app", "my-app.png", "Utility");
         assert!(content.contains("Name=My App"));
         assert!(content.contains("Exec=my-app"));
-        assert!(content.contains("Icon=my-app.png"));
+        // freedesktop Icon Theme Spec: the Icon value carries no extension.
+        assert!(content.contains("Icon=my-app"));
         assert!(content.contains("Categories=Utility;"));
     }
 
