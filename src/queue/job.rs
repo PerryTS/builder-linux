@@ -51,6 +51,12 @@ pub struct BuildManifest {
     pub linux_category: Option<String>,
     #[serde(default)]
     pub linux_description: Option<String>,
+    /// C library / linkage for the Linux target: `glibc` (default) or `musl`
+    /// (fully static — no glibc loader dependency, runs on Lambda
+    /// provided.al2023 / scratch / distroless). Selects `perry compile
+    /// --target linux-musl`. #4826.
+    #[serde(default)]
+    pub linux_libc: Option<String>,
     // Windows-specific fields (pass-through for cross-compiled bundles)
     #[serde(default)]
     pub windows_distribute: Option<String>,

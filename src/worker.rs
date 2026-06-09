@@ -329,6 +329,27 @@ async fn run_perry_update(perry_binary: &str) -> (bool, String, Option<String>) 
         }
     }
 
+    // 2b. Static musl libs (#4826) for `--libc musl` / `[linux] libc = "musl"`
+    //     serverless builds. CI doesn't emit a `perry-cross-*-musl` bundle
+    //     (the build-cross matrix hard-requires a UI lib, which musl has no
+    //     glibc-free GTK build of), but the `perry-linux-x86_64-musl.tar.gz`
+    //     HOST artifact already ships libperry_runtime.a / libperry_stdlib.a /
+    //     libperry_ext_*.a built for x86_64-unknown-linux-musl. Drop those
+    //     into target/x86_64-unknown-linux-musl/release/ where find_library
+    //     resolves them when the worker passes `--target linux-musl`. The
+    //     bundle also contains a musl `perry` binary, which lands harmlessly
+    //     in this per-triple dir (the worker always runs the host
+    //     target/release/perry). Non-fatal: a release predating musl just
+    //     can't serve musl jobs.
+    {
+        let url = format!("{base}/perry-linux-x86_64-musl.tar.gz");
+        let dest = target_dir.join("x86_64-unknown-linux-musl").join("release");
+        match fetch_extract(&url, "perry-linux-x86_64-musl.tar.gz", &tmp, &dest).await {
+            Ok(()) => tracing::info!("Installed static musl libs (x86_64-unknown-linux-musl)"),
+            Err(e) => tracing::warn!("musl libs (non-fatal): {e}"),
+        }
+    }
+
     // 3. ios-game-loop runtime variant. CI does NOT ship this (it's a
     //    feature-flagged build of just perry-runtime); games like jump
     //    link `libperry_runtime_gameloop.a`. Build the single crate
