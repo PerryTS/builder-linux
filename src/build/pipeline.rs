@@ -73,6 +73,16 @@ async fn run_pipeline(
     std::fs::create_dir_all(binary_path.parent().unwrap())
         .map_err(|e| format!("Failed to create output dir: {e}"))?;
 
+    // #4826: a `[linux] libc = "musl"` / `--libc musl` publish builds the
+    // fully-static `x86_64-unknown-linux-musl` target instead of the native
+    // glibc one, so the artifact runs on AWS Lambda provided.al2023,
+    // scratch/distroless containers, Cloud Run, etc.
+    let linux_is_musl = request
+        .manifest
+        .linux_libc
+        .as_deref()
+        .map(|s| s.eq_ignore_ascii_case("musl"))
+        .unwrap_or(false);
     let compiler_target = match target {
         BuildTarget::Android => Some("android"),
         BuildTarget::Windows => Some("windows"),
@@ -81,9 +91,17 @@ async fn run_pipeline(
         BuildTarget::Tvos => Some("tvos"),
         // aarch64 Linux is a cross-compile even on a Linux host, so it must
         // pass an explicit --target (unlike native x86_64 Linux below).
+        BuildTarget::LinuxArm64 if linux_is_musl => Some("linux-aarch64-musl"),
         BuildTarget::LinuxArm64 => Some("linux-arm64"),
+        // musl x86_64 also needs an explicit --target so the compiler picks
+        // the musl driver (`musl-gcc`) + `-static`; plain x86_64 glibc stays
+        // on the native-host default (None).
+        BuildTarget::Linux if linux_is_musl => Some("linux-musl"),
         BuildTarget::Linux => None, // native compilation on Linux host
     };
+    if linux_is_musl {
+        tracing::info!("Linux build requested musl libc → static target {:?}", compiler_target);
+    }
     // For ios-game-loop: swap the runtime with the game-loop variant
     let has_game_loop = request.manifest.features.as_ref()
         .map(|f| f.iter().any(|s| s == "ios-game-loop"))
